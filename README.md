@@ -1,5 +1,7 @@
 # buqi-minimax-h3-multigpu
 
+**English** | [中文](README_zh.md) | [日本語](README_ja.md)
+
 Multi-GPU (sequence-parallel) inference for **MiniMax-H3** in ComfyUI — one node,
 drop-in replacement for `UNETLoader`, **bit-identical output**, no quality loss.
 
@@ -17,7 +19,9 @@ Designed for the community's common setups first: **2 GPUs** (works from 1 to 8)
 - Linux (or WSL2 on Windows — NCCL is not available on native Windows)
 - ComfyUI **>= 0.30.0** (the release that ships `comfy.ldm.minimax.model`); the
   loader refuses to import on older builds
-- MiniMax-H3 model files installed as usual (`diffusion_models/`, `text_encoders/`, `vae/`)
+- MiniMax-H3 model files (DiT, Qwen3-VL text encoder, video/audio VAEs) installed
+  as usual into `diffusion_models/`, `text_encoders/`, `vae/` — get them from the
+  official MiniMax-H3 release; this repo contains code only
 - PyTorch with NCCL (stock ComfyUI wheels include it)
 - `world_size` must divide the 56 attention heads: **1, 2, 4, 7, 8**
 
@@ -25,7 +29,7 @@ Designed for the community's common setups first: **2 GPUs** (works from 1 to 8)
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/buqi/buqi-minimax-h3-multigpu.git
+git clone https://github.com/buqi-code/buqi-minimax-h3-multigpu.git
 ```
 
 No extra Python dependencies.
@@ -44,7 +48,9 @@ No extra Python dependencies.
 3. Queue a prompt. First run spawns one worker process per extra GPU and loads a
    copy of the DiT on each (~21 GB fp8 per card); later prompts reuse them.
 
-An API-format example is in [`examples/workflow_api_2gpu.json`](examples/workflow_api_2gpu.json).
+An API-format example is in [`examples/workflow_api_2gpu.json`](examples/workflow_api_2gpu.json);
+a ready-to-import graph workflow (drag & drop into the ComfyUI canvas) is
+[`examples/workflow_ui_2gpu.json`](examples/workflow_ui_2gpu.json).
 
 ## Node inputs
 
@@ -69,7 +75,7 @@ also lets you hold larger activations.
 | fp8 (recommended) | ~21 GB | 24 GB cards up to 720p, comfortable at 480p |
 | bf16 (`default` dtype from bf16 checkpoint) | ~40 GB | 48 GB+ cards |
 
-Tested resolution grid on RTX PRO 5000 (48 GB), fp8, 20 steps, end-to-end seconds:
+Measured on RTX PRO 5000 (48 GB), fp8, 20 steps, end-to-end seconds:
 
 | shape | 1 GPU | SP2 | speedup |
 |---|---|---|---|
@@ -137,4 +143,4 @@ no loss.
 
 ## License
 
-GPL-3.0 (see [LICENSE](LICENSE)).
+MIT (see [LICENSE](LICENSE)).
