@@ -133,3 +133,9 @@ H3 DiT 处理一条打包序列 `[text|cond|audio|video]`,共 56 个注意力头
 ## 许可证
 
 MIT(见 [LICENSE](LICENSE)),可自由使用、修改、商用。
+
+---
+
+关键词:MiniMax H3、MiniMax-H3、ComfyUI、ComfyUI 自定义节点、多卡、多卡并行、
+并行推理、序列并行、Ulysses、视频生成、音画同步、video generation、
+multi-GPU、H3 加速。

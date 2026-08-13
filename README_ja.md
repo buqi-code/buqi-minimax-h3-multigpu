@@ -142,3 +142,9 @@ H3 DiT は `[text|cond|audio|video]` のパックされた1本のシーケンス
 ## ライセンス
 
 MIT([LICENSE](LICENSE) 参照)。利用・改変・商用利用すべて自由です。
+
+---
+
+キーワード:MiniMax H3、MiniMax-H3、ComfyUI、ComfyUI カスタムノード、マルチ GPU、
+並列推論、シーケンス並列、Ulysses、動画生成、ビデオ生成、音声同時生成、
+video generation、multi-GPU。

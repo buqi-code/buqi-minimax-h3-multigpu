@@ -2,11 +2,12 @@
 
 **English** | [中文](README_zh.md) | [日本語](README_ja.md)
 
-Multi-GPU (sequence-parallel) inference for **MiniMax-H3** in ComfyUI — one node,
-drop-in replacement for `UNETLoader`, **bit-identical output**, no quality loss.
+Multi-GPU (sequence-parallel) inference for **MiniMax-H3** in ComfyUI — one custom
+node, drop-in replacement for `UNETLoader`, **bit-identical output**, no quality loss.
 
-MiniMax-H3 generates video **and audio** jointly from a single packed-token DiT.
-This node shards that packed sequence across 2/4/7/8 GPUs with the
+MiniMax-H3 is a joint video+audio generation model: one packed-token DiT produces
+the video *and* its soundtrack (text-to-video / image-to-video with synchronized
+audio). This node shards that packed sequence across 2/4/7/8 GPUs with the
 [DeepSpeed-Ulysses](https://arxiv.org/abs/2309.14509) all-to-all scheme: every
 GPU computes exact full attention for a subset of heads, so the math is
 unchanged — the multi-GPU result is bit-identical to single-GPU sampling
@@ -144,3 +145,9 @@ no loss.
 ## License
 
 MIT (see [LICENSE](LICENSE)).
+
+---
+
+Keywords: MiniMax H3, MiniMax-H3, ComfyUI, ComfyUI custom node, multi-GPU, 多卡,
+多卡并行, 并行推理, sequence parallelism, Ulysses, video generation, audio
+generation, 视频生成, 音画同步, ビデオ生成, H3 加速, multi GPU inference.
