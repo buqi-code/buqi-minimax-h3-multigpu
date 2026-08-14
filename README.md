@@ -95,17 +95,17 @@ Measured on 2× RTX PRO 5000 Blackwell (72 GB, PCIe 5.0, **no NVLink**), fp8,
 
 | stage | 1 GPU | SP2 | speedup |
 |---|---|---|---|
-| denoise loop | 78.5 s | 43.6 s | **1.80×** |
+| denoise loop | 78.3 s | 42.3 s | **1.85×** |
 | VAE decode (not parallelized) | 5.9 s | 5.9 s | 1.00× |
-| end-to-end | 89.2 s | 55.7 s | **1.60×** |
+| end-to-end | 89.1 s | 55.3 s | **1.61×** |
 
 Where the remaining gap goes, from the op-level profile (`MINIMAX_SP_PROFILE_OPS=1`,
-per step, per rank): attention 812 ms, MLP 646 ms, gather+qkv_proj 316 ms,
-output all-to-all 115 ms, out_proj 81 ms, modulation+norms 76 ms. The transformer
-GEMMs already run at 270–370 TFLOPS (fp8) and attention at ~176 TFLOPS, so there
-is nothing left to win in the math itself — the only cost that does not shard is
-the inter-GPU exchange, now down to ~20 % of a step from ~34 % before the
-`all_gather` path and overlap landed.
+per step, per rank): attention+output exchange 856 ms (timed together because they
+overlap), MLP 657 ms, gather+qkv_proj 325 ms, out_proj 83 ms, modulation+norms
+76 ms, QK-norm+RoPE 27 ms. The transformer GEMMs already run at 270–370 TFLOPS
+(fp8) and attention at ~176 TFLOPS, so there is nothing left to win in the math
+itself — the only cost that does not shard is the inter-GPU exchange, which
+started at ~21 % of a step (481 ms) and is now largely hidden behind compute.
 
 End-to-end scaling is capped by the parts that still run on one GPU: VAE decode
 (5.9 s here) and video muxing. Longer clips and higher resolutions therefore scale
@@ -168,6 +168,7 @@ per-step dispatch cost, which is what the tuning above was based on.
 | `MINIMAX_SP_DEVICES` | fallback device list when `devices=auto`, e.g. `0,1` |
 | `MINIMAX_SP_LOGDIR` | worker log directory (default: system temp) |
 | `MINIMAX_SP_AG_CHUNKS` | sub-chunks the hidden-state gather is split into so it overlaps the projection (default 4; 1 disables overlap) |
+| `MINIMAX_SP_ATTN_CHUNKS` | head chunks attention is split into so the output exchange overlaps it (default 4; 1 disables overlap) |
 | `MINIMAX_SP_PROFILE` | log per-step dispatch and forward timings |
 | `MINIMAX_SP_PROFILE_OPS` | log the per-step breakdown by region |
 
@@ -213,11 +214,15 @@ single per-tensor scale, so selecting rows leaves every output element the same
 dot product it was. It costs one extra copy of `1/world` of that weight per card
 (~2.9 GB at fp8, `world_size=2`).
 
-Finally the gather is issued as several asynchronous sub-transfers
-(`MINIMAX_SP_AG_CHUNKS`, default 4) so that each chunk's projection runs while the
-next chunk is still in flight — worth another ~90 ms per step at 480p. Chunking
-changes no arithmetic; `tests/latent_parity.py` reports it bit-identical at 1, 2,
-4 and 8 chunks.
+Finally both transfers are overlapped with the compute that surrounds them. The
+gather is issued as several asynchronous sub-transfers (`MINIMAX_SP_AG_CHUNKS`,
+default 4) so each chunk's projection runs while the next chunk is still in
+flight, and attention is computed in head chunks (`MINIMAX_SP_ATTN_CHUNKS`,
+default 4) so each chunk's output exchange flies while the next chunk is
+computed. Together these are worth ~150 ms per step at 480p. Neither changes any
+arithmetic — heads are independent in attention, and rows are independent in the
+projection — and `tests/latent_parity.py` reports both bit-identical at 1, 2, 4
+and 8 chunks.
 
 ## License
 

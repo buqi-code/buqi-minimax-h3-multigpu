@@ -84,17 +84,18 @@ API 格式示例见 [`examples/workflow_api_2gpu.json`](examples/workflow_api_2g
 
 | 阶段 | 单卡 | SP2 | 加速 |
 |---|---|---|---|
-| 去噪循环 | 78.5s | 43.6s | **1.80×** |
+| 去噪循环 | 78.3s | 42.3s | **1.85×** |
 | VAE 解码(未并行) | 5.9s | 5.9s | 1.00× |
-| 端到端 | 89.2s | 55.7s | **1.60×** |
+| 端到端 | 89.1s | 55.3s | **1.61×** |
 
 测试环境:2× RTX PRO 5000 Blackwell(72GB,PCIe 5.0,**无 NVLink**),fp8,
 832×480,20 步。
 
-算子级剖析(`MINIMAX_SP_PROFILE_OPS=1`,每步每卡):attention 812ms、MLP 646ms、
-gather+qkv_proj 316ms、输出 all-to-all 115ms、out_proj 81ms、调制+norm 76ms。
+算子级剖析(`MINIMAX_SP_PROFILE_OPS=1`,每步每卡):attention+输出交换 856ms
+(两者重叠故合并计时)、MLP 657ms、gather+qkv_proj 325ms、out_proj 83ms、
+调制+norm 76ms、QK-norm+RoPE 27ms。
 主干 GEMM 已跑到 270–370 TFLOPS(fp8),attention 约 176 TFLOPS,**算子本身已无空间**;
-唯一不随卡数摊薄的就是卡间通信,经 `all_gather` 改造与重叠后已从约 34% 降到约 20%。
+唯一不随卡数摊薄的就是卡间通信 —— 起初占每步约 21%(481ms),现已基本被计算掩盖。
 
 端到端加速比受限于仍在单卡上跑的尾部:VAE 解码(此处 5.9s)与封装。视频更长、
 分辨率更高时扩展性更好,因为去噪时间增长而这段尾巴基本不变。
@@ -150,6 +151,7 @@ MINIMAX_SP_PROFILE_OPS=1 MINIMAX_SP_PROFILE=1 python main.py --cuda-device 0,1 -
 | `MINIMAX_SP_DEVICES` | `devices=auto` 时的备选卡表,如 `0,1` |
 | `MINIMAX_SP_LOGDIR` | worker 日志目录(默认系统临时目录) |
 | `MINIMAX_SP_AG_CHUNKS` | 隐状态 gather 拆成几个子块以与投影重叠(默认 4;设 1 关闭重叠) |
+| `MINIMAX_SP_ATTN_CHUNKS` | attention 按 head 拆成几块以与输出交换重叠(默认 4;设 1 关闭重叠) |
 | `MINIMAX_SP_PROFILE` | 打印每步调度与前向耗时 |
 | `MINIMAX_SP_PROFILE_OPS` | 打印每步按区域的耗时拆分 |
 
@@ -187,9 +189,12 @@ all_gather 更优 —— 480p PCIe 实测:每 block 通信 6.04ms → 2.34ms,达
 若干行之后,每个输出元素仍是原来那个点积。代价是每卡多存该权重的 `1/world`
 (fp8、双卡时约 2.9GB)。
 
-最后,gather 被拆成若干异步子传输(`MINIMAX_SP_AG_CHUNKS`,默认 4),使每块的投影
-与下一块的传输重叠 —— 480p 上再省约 90ms/步。分块不改变任何算术:
-`tests/latent_parity.py` 在 1/2/4/8 块下均报告逐比特相同。
+最后,两处传输都与周边计算重叠:gather 拆成若干异步子传输
+(`MINIMAX_SP_AG_CHUNKS`,默认 4),使每块的投影与下一块的传输并行;attention 按
+head 分块计算(`MINIMAX_SP_ATTN_CHUNKS`,默认 4),使每块的输出交换与下一块的
+attention 并行。两者合计在 480p 上约省 150ms/步。都不改变任何算术 —— attention 的
+head 彼此独立,投影的行彼此独立 —— `tests/latent_parity.py` 在 1/2/4/8 块下均报告
+逐比特相同。
 
 ## 许可证
 

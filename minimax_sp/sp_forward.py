@@ -45,6 +45,7 @@ EXPECTED_MODEL_SHA = "pinned to ComfyUI 0.30.0"
 
 PROFILE_OPS = bool(os.environ.get("MINIMAX_SP_PROFILE_OPS"))
 AG_CHUNKS = max(1, int(os.environ.get("MINIMAX_SP_AG_CHUNKS", "4")))
+ATTN_CHUNKS = max(1, int(os.environ.get("MINIMAX_SP_ATTN_CHUNKS", "4")))
 _prof_acc = {}
 
 
@@ -224,6 +225,51 @@ def gather_and_project(attn_proj, x, ctx, chunks, out_dim):
     return out
 
 
+def attention_and_exchange(q, k, v, ctx, transformer_options, chunks, hp, dim):
+    """Attention in head chunks, with each chunk's output exchange in flight while
+    the next chunk is computed.
+
+    Heads are independent, so chunking the attention is exact. The exchange hands
+    every rank the rows it owns for the chunk's heads; those land at that rank's
+    head offset plus the chunk offset, which is the column order the single
+    unchunked exchange produced.
+    """
+    inner = ctx.world * hp * dim
+    if chunks <= 1:
+        with region("attn"):
+            out = optimized_attention(q, k, v, hp, mask=None, skip_reshape=True,
+                                      transformer_options=transformer_options)
+        with region("a2a_out"):
+            return a2a_scatter_seq_gather_heads(out.squeeze(0), ctx)
+
+    span = -(-hp // chunks)
+    pending = []
+    with region("attn+a2a_out"):
+        for h0 in range(0, hp, span):
+            h1 = min(h0 + span, hp)
+            out = optimized_attention(q[:, h0:h1], k[:, h0:h1], v[:, h0:h1], h1 - h0,
+                                      mask=None, skip_reshape=True,
+                                      transformer_options=transformer_options)
+            cd = (h1 - h0) * dim
+            send = out.squeeze(0).contiguous().view(-1)
+            buf = torch.empty(ctx.world * ctx.local * cd, dtype=q.dtype, device=q.device)
+            work = dist.all_to_all_single(
+                buf, send,
+                output_split_sizes=[ctx.local * cd] * ctx.world,
+                input_split_sizes=[n * cd for n in ctx.splits],
+                group=ctx.group, async_op=True)
+            pending.append((h0, cd, buf, work))
+
+        out_full = torch.empty(ctx.local, inner, dtype=q.dtype, device=q.device)
+        for h0, cd, buf, work in pending:
+            work.wait()
+            piece = buf.view(ctx.world, ctx.local, cd)
+            for r in range(ctx.world):
+                off = r * hp * dim + h0 * dim
+                out_full[:, off:off + cd] = piece[r]
+    return out_full
+
+
 def sp_attention_allgather(attn, x, rope_full, ctx, transformer_options, chunks=None):
     """Ulysses attention that broadcasts h instead of swapping Q/K/V.
 
@@ -254,12 +300,10 @@ def sp_attention_allgather(attn, x, rope_full, ctx, transformer_options, chunks=
         else:
             q = attn.q_norm(q.view(s, hp, dim))
             k = attn.k_norm(k.view(s, hp, dim))
-    with region("attn"):
-        out = optimized_attention(
-            q.transpose(0, 1).unsqueeze(0), k.transpose(0, 1).unsqueeze(0), v.transpose(0, 1).unsqueeze(0),
-            hp, mask=None, skip_reshape=True, transformer_options=transformer_options)
-    with region("a2a_out"):
-        out = a2a_scatter_seq_gather_heads(out.squeeze(0), ctx)
+    out = attention_and_exchange(
+        q.transpose(0, 1).unsqueeze(0), k.transpose(0, 1).unsqueeze(0),
+        v.transpose(0, 1).unsqueeze(0), ctx, transformer_options,
+        ATTN_CHUNKS, hp, dim)
     with region("out_proj"):
         return attn.out_proj(out)
 
