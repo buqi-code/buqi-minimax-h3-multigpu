@@ -14,11 +14,12 @@ spreads both stages across 2/4/7/8 GPUs:
 - **`MiniMaxH3SPUNETLoader`** — replaces `UNETLoader`. Shards the DiT's packed
   sequence across ranks with [DeepSpeed-Ulysses](https://arxiv.org/abs/2309.14509):
   every rank computes exact full attention for a subset of heads, so the math
-  is unchanged. Denoise **1.91×** on 2 GPUs (below).
+  is unchanged. Denoise **1.94×** on 2 GPUs, **6.65×** on 8 (below).
 - **`MiniMaxH3SPVAEDecode`** — optional replacement for `VAEDecode`. Spreads
   the video VAE's temporal chunks across the same ranks. VAE decode
-  **1.69×** on 2 GPUs.
-- End-to-end **1.84×** on 2 GPUs at 480p; profile-driven, PCIe-friendly.
+  **1.70×** on 2 GPUs, **5.99×** on 8.
+- End-to-end **1.95×** on 2 GPUs at 480p and **6.28×** on 8 GPUs at 1080p;
+  profile-driven, PCIe-friendly (measured without NVLink).
 
 ### On accuracy
 
@@ -98,36 +99,40 @@ also lets you hold larger activations.
 | fp8 (recommended) | ~21 GB | 24 GB cards up to 720p, comfortable at 480p |
 | bf16 (`default` dtype from bf16 checkpoint) | ~40 GB | 48 GB+ cards |
 
-Measured on 2× RTX PRO 5000 Blackwell (72 GB, PCIe 5.0, **no NVLink**), fp8,
-832×480, 20 steps:
+Measured on up to 8× RTX PRO 5000 Blackwell (72 GB, PCIe 5.0, **no NVLink**), fp8,
+124 frames, 20 steps. Every number is steady state — the first sharded decode of
+a session pays a one-time weight handover, so each configuration was measured on
+a second run:
 
-| stage | 1 GPU | SP2 | speedup |
-|---|---|---|---|
-| denoise loop | 78.3 s | 41.0 s | **1.91×** |
-| VAE decode | 5.9 s | 3.5 s | **1.69×** |
-| end-to-end | 84.9 s | 46.2 s | **1.84×** |
+| shape | GPUs | 1 GPU | multi-GPU | end-to-end | denoise | VAE | cost per second of output |
+|---|---|---|---|---|---|---|---|
+| 832×480 | 2 | 89.7 s | 46.7 s | **1.95×** | 1.94× | 1.70× | **1.03×** |
+| 832×480 | 4 | 91.2 s | 27.0 s | **3.37×** | 3.41× | 3.27× | **1.19×** |
+| 832×480 | 8 | 91.1 s | 19.2 s | **4.74×** | 4.86× | 5.99× | 1.69× |
+| 1280×736 | 8 | 301.6 s | 57.8 s | **5.22×** | 5.46× | 5.11× | 1.53× |
+| 1920×1088 | 8 | 1131.8 s | 180.2 s | **6.28×** | 6.65× | 5.09× | **1.27×** |
 
-The VAE row needs `MiniMaxH3SPVAEDecode` (see below) and is capped by how the
-temporal chunks divide: this clip has 7 of them, so a 4/3 split across two GPUs
-cannot beat 1.75×. The first decode of a session additionally pays a one-time
-~2.3 s to hand the VAE weights to the workers.
+The last column is `GPUs / speedup` — how much more GPU-time a second of video
+costs than on one card. Two GPUs are nearly free (+3 %) and four are cheap
+(+19 %); eight only pay off on big canvases, because there the denoise loop grows
+while the fixed tail (text encoder, muxing) stays flat and the exchange stays
+proportional to the work.
 
-Where the denoise step goes, from the op-level profile (`MINIMAX_SP_PROFILE_OPS=1`,
-per step, per rank): attention+output exchange 856 ms (timed together because they
-overlap), MLP 657 ms, gather+qkv_proj 325 ms, out_proj 83 ms, modulation+norms
-76 ms, QK-norm+RoPE 27 ms. The transformer GEMMs already run at 270–370 TFLOPS
-(fp8) and attention at ~176 TFLOPS, so there is nothing left to win in the math
-itself — the only cost that does not shard is the inter-GPU exchange, which
-started at ~21 % of a step (481 ms) and is now largely hidden behind compute.
+The VAE rows need `MiniMaxH3SPVAEDecode` (see below). Its ceiling is set by how
+the temporal chunks divide — these clips have 7, so two GPUs split them 4/3 and
+cannot beat 1.75×, while eight GPUs get one chunk each.
 
-What still runs on one GPU: the text encoder (~1 s for a short prompt) and video
-muxing. Longer clips and higher resolutions scale better, since the denoise loop
-grows while that tail stays flat and the VAE gains more chunks to spread.
+Where the denoise step goes at 480p on 2 GPUs, from the op-level profile
+(`MINIMAX_SP_PROFILE_OPS=1`, per step, per rank): attention+output exchange
+856 ms (timed together because they overlap), MLP 657 ms, gather+qkv_proj 325 ms,
+out_proj 83 ms, modulation+norms 76 ms, QK-norm+RoPE 27 ms. The transformer GEMMs
+already run at 270–370 TFLOPS (fp8) and attention at ~176 TFLOPS, so there is
+nothing left to win in the math itself — the only cost that does not shard is the
+inter-GPU exchange, which started at ~21 % of a step (481 ms) and is now largely
+hidden behind compute.
 
-Larger shapes (1080p and up) additionally benefit from activations being split
-across ranks, which can push a single GPU into offloading while SP2 stays
-resident — those cases can look super-linear for that reason, not because
-sequence parallelism exceeds its own limit.
+At 1080p a single GPU also starts paying for memory pressure that the sharded run
+avoids, which is part of why that row scales best.
 
 ## Resolution constraints
 
