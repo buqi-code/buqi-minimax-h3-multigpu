@@ -2,12 +2,19 @@
 
 [English](README.md) | **中文** | [日本語](README_ja.md)
 
-ComfyUI 上 **MiniMax-H3** 的多卡(序列并行)推理节点 —— 替换 `UNETLoader` 即可使用,
-**无任何近似、无精度降低**。
+ComfyUI 上 **MiniMax-H3** 的真·多卡推理 —— 不只并行采样,**VAE 解码也并行**。
+两个即插即用节点,**无任何近似、无精度降低**。
 
-MiniMax-H3 用一个打包 token 的 DiT 同时生成**视频+音频**。本节点按
-[DeepSpeed-Ulysses](https://arxiv.org/abs/2309.14509) 方案把该序列切分到 2/4/7/8
-张 GPU:每张卡对自己分到的一批注意力头做**完整精确的注意力**,数学上完全等价。
+MiniMax-H3 用一个打包 token 的 DiT 同时生成**视频+音频**,再由视频 VAE 把 latent
+解成像素。本仓库把这两段都分散到 2/4/7/8 张 GPU:
+
+- **`MiniMaxH3SPUNETLoader`** —— 替换 `UNETLoader`。按
+  [DeepSpeed-Ulysses](https://arxiv.org/abs/2309.14509) 把 DiT 的打包序列切分到
+  各 rank:每张卡对自己那批注意力头做**完整精确的注意力**,数学等价。
+  双卡去噪 **1.91×**(数据见下)。
+- **`MiniMaxH3SPVAEDecode`** —— 可选,替换 `VAEDecode`。把视频 VAE 的时间块
+  分散到同一批 GPU。双卡 VAE **1.69×**。
+- 480p 端到端 **1.84×**;基于剖析驱动,PCIe 环境友好。
 
 ### 关于精度
 
@@ -195,33 +202,37 @@ MINIMAX_SP_PROFILE_OPS=1 MINIMAX_SP_PROFILE=1 python main.py --cuda-device 0,1 -
 
 ## 原理
 
-H3 DiT 处理一条打包序列 `[text|cond|audio|video]`,共 56 个注意力头。Ulysses SP
-让序列按行切分常驻各卡:所有逐 token 运算(patch proj、调制、RoPE、MLP)都是行内
-本地计算,无需通信;只有注意力跨卡 —— 每卡最终对自己负责的 56/`world_size` 个头在
-**完整序列**上做精确注意力。
+两个节点都是**整段并行**,不只是 kernel 层;没有任何近似或额外量化。
 
-让"头"和"序列"对齐有两种做法,哪种更省取决于卡数:
+**DiT(去噪循环)** —— H3 DiT 处理一条打包序列 `[text|cond|audio|video]`,共 56 个
+注意力头。Ulysses SP 让序列按行切分常驻各卡:所有逐 token 运算(patch proj、调制、
+RoPE、MLP)都是行内本地计算,无需通信;只有注意力跨卡 —— 每卡对自己负责的
+56/`world_size` 个头在**完整序列**上做精确注意力。支持两种通信方案,按卡数自动选择:
 
-- **all-to-all**(经典 Ulysses):在本地行上算出全部 56 头的 Q/K/V,再把"头维"换成
-  "序列维"。每行搬运 `3 × inner / world` 字节。
-- **all_gather**(`world_size ≤ 4` 时启用):改为广播调制后的隐状态,然后只用本卡
-  那部分 `qkv_proj` 权重行去投影。每行搬运 `hidden` 字节,且 Q/K/V 出来就已经横跨
-  完整序列,**三次 transpose+拷贝彻底消失**。
+- `world_size ≤ 4`:广播调制后的隐状态,只用本卡那部分 `qkv_proj` 权重行做投影,
+  每行搬运 `hidden` 字节,**经典方案里三次 transpose+拷贝彻底消失**。
+  fp8 权重按行切分是精确的,因为 scale 是 per-tensor。
+- `world_size ≥ 7`:走经典 all-to-all(每行 `3 × inner / world` 字节)。
 
-对 H3(`hidden` 5376、`inner` 7168),两者在 `world_size == 4` 时字节相等,小于 4 时
+对 H3(`hidden` 5376、`inner` 7168),两者在 world 4 时字节相等,小于 4 时
 all_gather 更优 —— 480p PCIe 实测:每 block 通信 6.04ms → 2.34ms,达成带宽从
-24.9 升到 32.2 GB/s(因为路径上不再有 permute)。大于 4 时仍走 all-to-all。
+24.9 升到 32.2 GB/s(路径上不再有 permute)。两处传输都与周边计算重叠:gather 拆成
+异步子传输(`MINIMAX_SP_AG_CHUNKS`,默认 4),每块的投影与下一块的传输并行;
+attention 按 head 分块(`MINIMAX_SP_ATTN_CHUNKS`,默认 4),每块的输出交换与下一块的
+attention 并行。两者合计在 480p 上约省 150ms/步。都不改变任何算术,
+`tests/latent_parity.py` 在 1/2/4/8 块下均报告逐比特相同。
 
-按行切分 `qkv_proj` 是精确的而非近似:fp8 权重只带一个 per-tensor scale,所以选取
-若干行之后,每个输出元素仍是原来那个点积。代价是每卡多存该权重的 `1/world`
-(fp8、双卡时约 2.9GB)。
+**VAE 解码** —— `decode_temporal` 逐时间块解码,每块只读 latent 的一个切片,块间
+独立。只把这层叶子计算按 rank 轮询分发,**空间 tile 的 blend、时间 blend、canvas
+写入全部留在 rank0 的官方代码路径里**。worker 的 VAE 权重是首次使用时由 rank0
+通过 NCCL 交接的(约 4.85 GiB,每会话一次约 2.3s),所以用的一定是你实际加载的
+那份权重(含自定义路径)。
 
-最后,两处传输都与周边计算重叠:gather 拆成若干异步子传输
-(`MINIMAX_SP_AG_CHUNKS`,默认 4),使每块的投影与下一块的传输并行;attention 按
-head 分块计算(`MINIMAX_SP_ATTN_CHUNKS`,默认 4),使每块的输出交换与下一块的
-attention 并行。两者合计在 480p 上约省 150ms/步。都不改变任何算术 —— attention 的
-head 彼此独立,投影的行彼此独立 —— `tests/latent_parity.py` 在 1/2/4/8 块下均报告
-逐比特相同。
+**试过但被否决的方案,免得再走一遍。** 剖析显示以下都不值得做:AdaLN 预计算
+(上游 pruned 权重已把 `t_dim` 因子化到 8 维曲线基,整条分支 44M 参数、每步 0.06ms)、
+文本编码器折叠(短提示实测总共只有 1.0s)、把 gloo 控制通道换成常驻 NCCL(每步 meta
+广播 0.3ms)、以及把调制+norm 融合为 Triton kernel(整块调制+norm 占每步 3.4%)。
+具体见提交历史。
 
 ## 许可证
 

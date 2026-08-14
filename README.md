@@ -2,15 +2,23 @@
 
 **English** | [中文](README_zh.md) | [日本語](README_ja.md)
 
-Multi-GPU (sequence-parallel) inference for **MiniMax-H3** in ComfyUI — one custom
-node, drop-in replacement for `UNETLoader`, **no approximation and no precision
-loss**.
+Real multi-GPU inference for **MiniMax-H3** in ComfyUI — not just the denoise
+loop, the **VAE decode** is parallelized too. Two drop-in nodes,
+**no approximation and no precision loss**.
 
-MiniMax-H3 is a joint video+audio generation model: one packed-token DiT produces
-the video *and* its soundtrack (text-to-video / image-to-video with synchronized
-audio). This node shards that packed sequence across 2/4/7/8 GPUs with the
-[DeepSpeed-Ulysses](https://arxiv.org/abs/2309.14509) scheme: every GPU computes
-exact full attention for a subset of heads, so the math is unchanged.
+MiniMax-H3 is a joint video+audio generation model: one packed-token DiT
+produces the video *and* its soundtrack (text-to-video / image-to-video with
+synchronized audio), then a video VAE turns the latents into pixels. This repo
+spreads both stages across 2/4/7/8 GPUs:
+
+- **`MiniMaxH3SPUNETLoader`** — replaces `UNETLoader`. Shards the DiT's packed
+  sequence across ranks with [DeepSpeed-Ulysses](https://arxiv.org/abs/2309.14509):
+  every rank computes exact full attention for a subset of heads, so the math
+  is unchanged. Denoise **1.91×** on 2 GPUs (below).
+- **`MiniMaxH3SPVAEDecode`** — optional replacement for `VAEDecode`. Spreads
+  the video VAE's temporal chunks across the same ranks. VAE decode
+  **1.69×** on 2 GPUs.
+- End-to-end **1.84×** on 2 GPUs at 480p; profile-driven, PCIe-friendly.
 
 ### On accuracy
 
@@ -219,43 +227,51 @@ per-step dispatch cost, which is what the tuning above was based on.
 
 ## How it works
 
-The H3 DiT processes one packed sequence `[text|cond|audio|video]` with 56
-attention heads. Ulysses SP keeps the sequence row-sharded across ranks; every
-per-token op (patch proj, modulation, RoPE, MLP) is row-local and runs without
-communication. Only attention crosses ranks: each rank ends up computing complete,
-exact attention over the *full* sequence for 56/`world_size` heads.
+Both nodes shard **whole stages**, not just kernels; nothing is approximated or
+quantized further.
 
-There are two ways to get the heads and the sequence to line up, and which one is
-cheaper depends on `world_size`:
+**DiT (denoise loop)** — the H3 DiT processes one packed sequence
+`[text|cond|audio|video]` with 56 attention heads. Ulysses SP keeps the sequence
+row-sharded across ranks; every per-token op (patch proj, modulation, RoPE, MLP)
+is row-local and runs without communication. Only attention crosses ranks —
+each rank computes exact full attention over the *full* sequence for
+56/`world_size` heads. Two exchange strategies are supported and picked by
+world size:
 
-- **all-to-all** (the classic Ulysses form): project Q/K/V for all 56 heads on the
-  local rows, then swap the head dim for the sequence dim. Moves
-  `3 * inner / world` bytes per row.
-- **all_gather** (used when `world_size <= 4`): broadcast the modulated hidden
-  state instead, then project it through only this rank's head rows of
-  `qkv_proj`. Moves `hidden` bytes per row, and Q/K/V come out already spanning
-  the full sequence, so the three transpose+copy steps disappear entirely.
+- `world_size <= 4` broadcasts the modulated hidden state and projects it
+  through only this rank's head rows of `qkv_proj`. Moves `hidden` bytes per
+  row and the three transpose+copy steps of the classic form disappear.
+  Row-slicing the fp8 weight is exact because its scale is per-tensor.
+- `world_size >= 7` keeps the classic all-to-all form
+  (`3 * inner / world` bytes per row).
 
-For H3 (`hidden` 5376, `inner` 7168) the two cost the same at `world_size == 4`
-and all_gather wins below it — measured at 480p on PCIe: 6.04 ms → 2.34 ms per
-block for the exchange, and the achieved bandwidth rises from 24.9 to 32.2 GB/s
-because there is no longer a permute in the way. Above 4 the all-to-all path is
-kept.
+For H3 (`hidden` 5376, `inner` 7168) they cost the same at world 4 and
+`all_gather` wins below it (6.04 ms → 2.34 ms per block on PCIe, and achieved
+bandwidth rises 24.9 → 32.2 GB/s because there is no longer a permute in the
+way). Both transfers overlap with the compute around them: the gather is issued
+as async sub-transfers (`MINIMAX_SP_AG_CHUNKS`, default 4) so each chunk's
+projection runs while the next chunk is still in flight, and attention is done
+in head chunks (`MINIMAX_SP_ATTN_CHUNKS`, default 4) so each chunk's output
+exchange flies while the next chunk is computed. Together those hide ~150 ms
+per step. Neither changes any arithmetic; `tests/latent_parity.py` confirms
+bit-identical output at 1, 2, 4 and 8 chunks.
 
-Row-slicing `qkv_proj` is exact rather than approximate: the fp8 weight carries a
-single per-tensor scale, so selecting rows leaves every output element the same
-dot product it was. It costs one extra copy of `1/world` of that weight per card
-(~2.9 GB at fp8, `world_size=2`).
+**VAE decode** — `decode_temporal` walks the latent one chunk at a time and
+each chunk only reads a slice of it, so the chunks are independent. Only that
+leaf work is distributed round-robin across ranks; every spatial tile blend,
+temporal blend and canvas write stays in the official code path on rank 0.
+Workers receive the VAE weights over NCCL from rank 0 on first use (~4.85 GiB,
+~2.3 s once per session), so the sharded decode always uses exactly the
+checkpoint that was loaded.
 
-Finally both transfers are overlapped with the compute that surrounds them. The
-gather is issued as several asynchronous sub-transfers (`MINIMAX_SP_AG_CHUNKS`,
-default 4) so each chunk's projection runs while the next chunk is still in
-flight, and attention is computed in head chunks (`MINIMAX_SP_ATTN_CHUNKS`,
-default 4) so each chunk's output exchange flies while the next chunk is
-computed. Together these are worth ~150 ms per step at 480p. Neither changes any
-arithmetic — heads are independent in attention, and rows are independent in the
-projection — and `tests/latent_parity.py` reports both bit-identical at 1, 2, 4
-and 8 chunks.
+**Tried and dropped, so nobody has to repeat it.** Profiling ruled these out:
+AdaLN precomputation (upstream pruned weights already factor `t_dim` to an
+8-dim curve basis; the whole branch is 44 M params and 0.06 ms per step),
+fold-in of the text encoder (measured 1.0 s total on the short prompt),
+swapping the gloo control channel for a persistent NCCL one (per-step meta
+broadcast is 0.3 ms), and fusing modulation/norm into a Triton kernel (the
+whole modulation+norm region is 3.4 % of a step). Details in the commit
+history.
 
 ## License
 
