@@ -22,6 +22,8 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 
+import comfy.model_management
+
 from . import sp_forward as spf
 from . import sp_vae as spv
 
@@ -198,6 +200,16 @@ class SPGroup:
 
         try:
             device = vae.device
+            t_setup = time.perf_counter()
+            # comfy only pulls the VAE onto the GPU inside vae.decode(), but the
+            # local chunks are decoded before that call, so make it resident here
+            # or larger shapes decode against offloaded CPU weights. Kept ahead of
+            # every broadcast: a failure must not leave workers in a collective.
+            comfy.model_management.load_models_gpu(
+                [vae.patcher],
+                memory_required=vae.memory_used_decode(samples.shape, vae.vae_dtype),
+                force_full_load=getattr(vae, "disable_offload", False))
+
             if not self.vae_sent:
                 self.send_vae(fsm, device)
 
@@ -208,21 +220,26 @@ class SPGroup:
             dist.broadcast(z.contiguous(), src=0)
 
             prepared = spv.prepare_latent(fsm, z, pad_tokens)
+            torch.cuda.synchronize()
             t_local = time.perf_counter()
             chunks = spv.decode_local(fsm, prepared, bounds, 0, self.world)
             torch.cuda.synchronize()
             t_wait = time.perf_counter()
 
             recvs = []
+            ops = []
             for i, (t0, t1) in enumerate(bounds):
                 owner = i % self.world
                 if owner == 0:
                     continue
                 buf = torch.empty(spv.chunk_shape(fsm, prepared, t0, t1),
                                   dtype=chunks[0].dtype if chunks else z.dtype, device=device)
-                recvs.append((i, buf, dist.irecv(buf, src=owner)))
-            for i, buf, req in recvs:
-                req.wait()
+                recvs.append((i, buf))
+                ops.append(dist.P2POp(dist.irecv, buf, peer=owner))
+            works = dist.batch_isend_irecv(ops) if ops else []
+            for w in works:
+                w.wait()
+            for i, buf in recvs:
                 chunks[i] = buf
 
             if os.environ.get("MINIMAX_SP_VAE_VERIFY"):
@@ -254,8 +271,9 @@ class SPGroup:
             torch.cuda.synchronize()
             logging.info(
                 f"[minimax_sp] vae decode: {len(bounds)} chunks, "
-                f"{len(bounds) - len(recvs)} local, local={t_wait - t_local:.2f}s "
-                f"recv={t_assemble - t_wait:.2f}s assemble={time.perf_counter() - t_assemble:.2f}s")
+                f"{len(bounds) - len(recvs)} local, setup={t_local - t_setup:.2f}s "
+                f"local={t_wait - t_local:.2f}s recv={t_assemble - t_wait:.2f}s "
+                f"assemble={time.perf_counter() - t_assemble:.2f}s")
             if os.environ.get("MINIMAX_SP_VAE_VERIFY"):
                 ref_out = vae.decode(samples)
                 d = (out.float() - ref_out.float()).abs()

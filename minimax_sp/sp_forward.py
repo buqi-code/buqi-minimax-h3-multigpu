@@ -150,20 +150,27 @@ class SPContext:
         return self.splits[self.rank]
 
 
-def a2a_scatter_heads_gather_seq(t, ctx):
-    """[s_local, H, D] -> [S_total, H/P, D]"""
+def post_heads_to_seq(t, ctx, pending):
+    """[s_local, H, D] -> [S_total, H/P, D], transfer posted asynchronously.
+
+    Appends (work, send) to pending: the send buffer has to stay referenced until
+    the transfer completes. Posting rather than blocking lets the Q, K and V
+    exchanges pipeline against each other's permute copies.
+    """
     s_local, heads, dim = t.shape
     p = ctx.world
     hp = heads // p
     chunk = hp * dim
     send = t.reshape(s_local, p, chunk).transpose(0, 1).contiguous().view(-1)
     out = torch.empty(ctx.seq_len * chunk, dtype=t.dtype, device=t.device)
-    dist.all_to_all_single(
+    work = dist.all_to_all_single(
         out, send,
         output_split_sizes=[n * chunk for n in ctx.splits],
         input_split_sizes=[s_local * chunk] * p,
         group=ctx.group,
+        async_op=True,
     )
+    pending.append((work, send))
     return out.view(ctx.seq_len, hp, dim)
 
 
@@ -209,12 +216,12 @@ def gather_and_project(attn_proj, x, ctx, chunks, out_dim):
     for a in range(0, maxn, span):
         b = min(a + span, maxn)
         buf = torch.empty(ctx.world * (b - a), hidden, dtype=x.dtype, device=x.device)
-        work = dist.all_gather_into_tensor(buf, src[a:b].contiguous(), group=ctx.group,
-                                          async_op=True)
-        pending.append((a, b, buf, work))
+        src_chunk = src[a:b].contiguous()
+        work = dist.all_gather_into_tensor(buf, src_chunk, group=ctx.group, async_op=True)
+        pending.append((a, b, buf, work, src_chunk))
 
     out = torch.empty(ctx.seq_len, out_dim, dtype=x.dtype, device=x.device)
-    for a, b, buf, work in pending:
+    for a, b, buf, work, _ in pending:
         work.wait()
         piece = attn_proj(buf)
         m = b - a
@@ -258,10 +265,10 @@ def attention_and_exchange(q, k, v, ctx, transformer_options, chunks, hp, dim):
                 output_split_sizes=[ctx.local * cd] * ctx.world,
                 input_split_sizes=[n * cd for n in ctx.splits],
                 group=ctx.group, async_op=True)
-            pending.append((h0, cd, buf, work))
+            pending.append((h0, cd, buf, work, send))
 
         out_full = torch.empty(ctx.local, inner, dtype=q.dtype, device=q.device)
-        for h0, cd, buf, work in pending:
+        for h0, cd, buf, work, _ in pending:
             work.wait()
             piece = buf.view(ctx.world, ctx.local, cd)
             for r in range(ctx.world):
@@ -330,15 +337,17 @@ def sp_attention(attn, x, rope_freqs, ctx, transformer_options):
 
     hp = heads // ctx.world
     with region("a2a_qkv"):
-        q = a2a_scatter_heads_gather_seq(q, ctx)
-        k = a2a_scatter_heads_gather_seq(k, ctx)
-        v = a2a_scatter_heads_gather_seq(v, ctx)
-    with region("attn"):
-        out = optimized_attention(
-            q.transpose(0, 1).unsqueeze(0), k.transpose(0, 1).unsqueeze(0), v.transpose(0, 1).unsqueeze(0),
-            hp, mask=None, skip_reshape=True, transformer_options=transformer_options)
-    with region("a2a_out"):
-        out = a2a_scatter_seq_gather_heads(out.squeeze(0), ctx)
+        pending = []
+        q = post_heads_to_seq(q, ctx, pending)
+        k = post_heads_to_seq(k, ctx, pending)
+        v = post_heads_to_seq(v, ctx, pending)
+        for work, _ in pending:
+            work.wait()
+        pending.clear()
+    out = attention_and_exchange(
+        q.transpose(0, 1).unsqueeze(0), k.transpose(0, 1).unsqueeze(0),
+        v.transpose(0, 1).unsqueeze(0), ctx, transformer_options,
+        ATTN_CHUNKS, hp, dim)
     with region("out_proj"):
         return attn.out_proj(out)
 
