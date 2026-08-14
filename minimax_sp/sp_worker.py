@@ -41,6 +41,7 @@ def main():
     import folder_paths
     from minimax_sp import sp_forward as spf
     from minimax_sp import sp_group as spg
+    from minimax_sp import sp_vae as spv
 
     model_options = {}
     if a.weight_dtype == "fp8_e4m3fn":
@@ -65,6 +66,7 @@ def main():
     logging.info(f"rank {a.rank}: ready")
 
     steps = 0
+    vae_model = None
     while True:
         box = [None]
         dist.broadcast_object_list(box, src=0, group=obj_pg)
@@ -74,6 +76,39 @@ def main():
             break
 
         tensors = {}
+        if meta.get("op") == "vae_load":
+            import comfy.ldm.minimax.vae
+
+            vae_model = comfy.ldm.minimax.vae.MiniMaxH3VideoVAE()
+            state = {}
+            for name, shape, dtype in meta["manifest"]:
+                t = torch.empty(shape, dtype=getattr(torch, dtype), device=device)
+                dist.broadcast(t, src=0)
+                state[name] = t
+            vae_model.load_state_dict(state)
+            vae_dtype = next(iter(state.values())).dtype if state else torch.float16
+            vae_model = vae_model.to(device=device, dtype=vae_dtype).eval()
+            del state
+            dist.barrier()
+            logging.info(f"rank {a.rank}: video VAE ready, "
+                         f"{torch.cuda.memory_allocated() / 2**30:.1f} GiB allocated")
+            continue
+
+        if meta.get("op") == "vae_decode":
+            if vae_model is None:
+                logging.error(f"rank {a.rank}: vae_decode before vae_load")
+                break
+            z = spg.alloc_from_meta(meta["z"], device)
+            dist.broadcast(z, src=0)
+            pad_tokens, bounds = spv.chunk_plan(vae_model, z.shape[2])
+            with torch.no_grad():
+                prepared = spv.prepare_latent(vae_model, z, pad_tokens)
+                mine = spv.decode_local(vae_model, prepared, bounds, a.rank, a.world)
+            for i in sorted(mine):
+                dist.send(mine[i].contiguous(), dst=0)
+            del z, prepared, mine
+            continue
+
         video = spg.alloc_from_meta(meta["video"], device)
         audio = spg.alloc_from_meta(meta["audio"], device)
         timestep = spg.alloc_from_meta(meta["timestep"], device)

@@ -84,9 +84,9 @@ API 格式示例见 [`examples/workflow_api_2gpu.json`](examples/workflow_api_2g
 
 | 阶段 | 单卡 | SP2 | 加速 |
 |---|---|---|---|
-| 去噪循环 | 78.3s | 42.3s | **1.85×** |
-| VAE 解码(未并行) | 5.9s | 5.9s | 1.00× |
-| 端到端 | 89.1s | 55.3s | **1.61×** |
+| 去噪循环 | 78.3s | 41.0s | **1.91×** |
+| VAE 解码 | 5.9s | 3.5s | **1.69×** |
+| 端到端 | 84.9s | 46.2s | **1.84×** |
 
 测试环境:2× RTX PRO 5000 Blackwell(72GB,PCIe 5.0,**无 NVLink**),fp8,
 832×480,20 步。
@@ -97,8 +97,12 @@ API 格式示例见 [`examples/workflow_api_2gpu.json`](examples/workflow_api_2g
 主干 GEMM 已跑到 270–370 TFLOPS(fp8),attention 约 176 TFLOPS,**算子本身已无空间**;
 唯一不随卡数摊薄的就是卡间通信 —— 起初占每步约 21%(481ms),现已基本被计算掩盖。
 
-端到端加速比受限于仍在单卡上跑的尾部:VAE 解码(此处 5.9s)与封装。视频更长、
-分辨率更高时扩展性更好,因为去噪时间增长而这段尾巴基本不变。
+VAE 那一行需要启用 `MiniMaxH3SPVAEDecode`(见下),其上限由时间块的划分决定:本例
+共 7 块,双卡 4:3 分配,理论上限就是 1.75×。每个会话首次解码另需约 2.3s 把 VAE
+权重交给 worker。
+
+仍在单卡上跑的部分:文本编码(短提示约 1s)与视频封装。视频更长、分辨率更高时
+扩展性更好 —— 去噪时间增长而这段尾巴基本不变,且 VAE 能分到更多块。
 
 更大画幅(1080p 及以上)还会因为激活被切分而受益:单卡可能已经在做显存换页,
 而 SP2 仍完全驻留。这类场景看起来"超线性"是这个原因,不是序列并行突破了自身上限。
@@ -109,9 +113,27 @@ API 格式示例见 [`examples/workflow_api_2gpu.json`](examples/workflow_api_2g
 整除,请用标准档位 —— 832×480、1280×736、1920×1088 等。
 `height=720` **不合法**(latent 高 45 为奇数),请用 736。
 
+## 多卡 VAE 解码(可选)
+
+把 `VAEDecode` 换成 **MiniMax H3 Multi-GPU VAE Decode**(`MiniMaxH3SPVAEDecode`),
+输入输出完全一致,视频 VAE 的时间块会分散到 SP 组已持有的那些卡上。
+
+`decode_temporal` 逐个时间块解码,每块只读 latent 的一个切片,因此块间独立。只有
+这层叶子计算被分发:**空间 tile 的 blend、时间 blend、canvas 写入全部留在 rank0 的
+官方代码路径里**,由它接收算好的块。结果逐比特相同(验证见下)。
+
+worker 的 VAE 权重是首次使用时由 rank0 通过 NCCL 交接的,而不是自己去找文件,所以
+分片解码用的一定就是你加载的那份权重(含自定义路径)。该传输约 4.85 GiB,每会话
+一次约 2.3s。
+
+这个特性是 opt-in 的,因为它不免费:每个 worker 要在 DiT 之外再放一份视频 VAE
+(约 5GB),fp8 下每卡约 26GB。**24GB 卡请继续用官方 `VAEDecode`。** 以下情况节点会
+自动回退到单卡解码(只打日志):没有运行中的 SP 组、`world_size` 为 1、传入的不是
+H3 video VAE、或 latent 的块数不足以切分。
+
 ## 在你机器上验证正确性
 
-真正有意义的检查是比对 DiT 的实际输出:
+两个测试都在**张量层面**比对,这是唯一有意义的层面。DiT:
 
 ```bash
 cd custom_nodes/buqi-minimax-h3-multigpu
@@ -123,16 +145,21 @@ torchrun --nproc_per_node=2 tests/latent_parity.py \
 与相对偏差。预期看到 `ag vs a2a … exact=True`(两种策略完全一致),以及 `vs 1gpu`
 的相对偏差约 4e-6。
 
-另外有一个端到端冒烟测试,各跑一遍并比对输出视频:
+VAE:
 
 ```bash
-python tests/selftest.py --server http://127.0.0.1:18188 --sp 2 \
-    --unet minimax_h3_fl2va_pruned_fp8_scaled.safetensors \
-    --image your_first_frame.png
+torchrun --nproc_per_node=2 tests/vae_parity.py --handover
 ```
 
-它的哈希比对只能当参考:H.264 有损,既可能掩盖真实差异,也可能报出肉眼不可见的
-差异。真正要确认精度请用 `latent_parity.py`。
+让各 worker 解自己的块、rank0 自己也解同样的切片,然后逐元素比对;`--handover` 表示
+worker 的 VAE 从 rank0 广播的权重重建,与生产路径完全一致。预期每块 `exact=True`。
+
+### 不要拿编码后的视频做比对
+
+`tests/selftest.py` 会端到端各跑一遍,但它**只是冒烟测试**。对输出视频求哈希证明不了
+任何事:编码后的容器**不是逐字节可复现的**。同样的种子、同样的输入、同样的官方代码
+路径跑三次,得到三个不同哈希(`529324c6…` 736142 字节、`c1c1c01c…` 与 `1bd76f6c…`
+均为 736204 字节)。在那里做哈希比对会报出不存在的失败,也会掩盖真实的失败。
 
 ## 性能剖析
 

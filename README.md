@@ -95,11 +95,16 @@ Measured on 2× RTX PRO 5000 Blackwell (72 GB, PCIe 5.0, **no NVLink**), fp8,
 
 | stage | 1 GPU | SP2 | speedup |
 |---|---|---|---|
-| denoise loop | 78.3 s | 42.3 s | **1.85×** |
-| VAE decode (not parallelized) | 5.9 s | 5.9 s | 1.00× |
-| end-to-end | 89.1 s | 55.3 s | **1.61×** |
+| denoise loop | 78.3 s | 41.0 s | **1.91×** |
+| VAE decode | 5.9 s | 3.5 s | **1.69×** |
+| end-to-end | 84.9 s | 46.2 s | **1.84×** |
 
-Where the remaining gap goes, from the op-level profile (`MINIMAX_SP_PROFILE_OPS=1`,
+The VAE row needs `MiniMaxH3SPVAEDecode` (see below) and is capped by how the
+temporal chunks divide: this clip has 7 of them, so a 4/3 split across two GPUs
+cannot beat 1.75×. The first decode of a session additionally pays a one-time
+~2.3 s to hand the VAE weights to the workers.
+
+Where the denoise step goes, from the op-level profile (`MINIMAX_SP_PROFILE_OPS=1`,
 per step, per rank): attention+output exchange 856 ms (timed together because they
 overlap), MLP 657 ms, gather+qkv_proj 325 ms, out_proj 83 ms, modulation+norms
 76 ms, QK-norm+RoPE 27 ms. The transformer GEMMs already run at 270–370 TFLOPS
@@ -107,9 +112,9 @@ overlap), MLP 657 ms, gather+qkv_proj 325 ms, out_proj 83 ms, modulation+norms
 itself — the only cost that does not shard is the inter-GPU exchange, which
 started at ~21 % of a step (481 ms) and is now largely hidden behind compute.
 
-End-to-end scaling is capped by the parts that still run on one GPU: VAE decode
-(5.9 s here) and video muxing. Longer clips and higher resolutions therefore scale
-better, since the denoise loop grows while that tail stays flat.
+What still runs on one GPU: the text encoder (~1 s for a short prompt) and video
+muxing. Longer clips and higher resolutions scale better, since the denoise loop
+grows while that tail stays flat and the VAE gains more chunks to spread.
 
 Larger shapes (1080p and up) additionally benefit from activations being split
 across ranks, which can push a single GPU into offloading while SP2 stays
@@ -123,9 +128,32 @@ the latent (px/16) must be divisible by the patch (2), so stick to the standard
 grids — 832×480, 1280×736, 1920×1088 etc. `height=720` is **not** a valid canvas
 (latent height 45 is odd); use 736.
 
+## Multi-GPU VAE decode (optional)
+
+Replace `VAEDecode` with **MiniMax H3 Multi-GPU VAE Decode**
+(`MiniMaxH3SPVAEDecode`) — same two inputs, same output — and the video VAE's
+temporal chunks are spread over the same GPUs the SP group already holds.
+
+`decode_temporal` walks the latent one chunk at a time and each chunk only reads a
+slice of it, so the chunks are independent. Only that leaf work is distributed:
+every spatial tile blend, temporal blend and canvas write stays in the official
+code path on rank 0, which is fed the finished chunks. The result is bit-identical
+(verified below).
+
+The workers receive the VAE weights over NCCL from rank 0 on first use rather than
+loading a file themselves, so the sharded decode always uses exactly the
+checkpoint you loaded, including custom paths. That transfer is ~4.85 GiB and
+costs ~2.3 s once per session.
+
+This is opt-in because it is not free: each worker holds the video VAE (~5 GB) on
+top of the DiT, so ~26 GB per card at fp8. On 24 GB cards, keep using the stock
+`VAEDecode`. The node falls back to the stock decode, with a log line, whenever
+sharding does not apply: no SP group running, `world_size` 1, a VAE that is not
+the H3 video VAE, or a latent with too few chunks to split.
+
 ## Verify correctness on your machine
 
-The meaningful check compares what the DiT actually produces, on the GPUs you own:
+Two tests compare tensors, which is the only meaningful level. The DiT:
 
 ```bash
 cd custom_nodes/buqi-minimax-h3-multigpu
@@ -133,23 +161,28 @@ torchrun --nproc_per_node=2 tests/latent_parity.py \
     --unet minimax_h3_fl2va_pruned_fp8_scaled.safetensors
 ```
 
-It runs the stock single-GPU `_forward` as the reference and the sequence-parallel
-forward on the same inputs, for both exchange strategies, and prints the maximum
-absolute and relative deviation. Expect `ag vs a2a … exact=True` (the two
-strategies agree exactly) and a `vs 1gpu` relative deviation around 4e-6.
+Runs the stock single-GPU `_forward` as the reference and the sequence-parallel
+forward on the same inputs, for both exchange strategies. Expect
+`ag vs a2a … exact=True` and a `vs 1gpu` relative deviation around 4e-6.
 
-There is also an end-to-end smoke test that renders one job each way and compares
-the output videos:
+And the VAE:
 
 ```bash
-python tests/selftest.py --server http://127.0.0.1:18188 --sp 2 \
-    --unet minimax_h3_fl2va_pruned_fp8_scaled.safetensors \
-    --image your_first_frame.png
+torchrun --nproc_per_node=2 tests/vae_parity.py --handover
 ```
 
-Treat its hash comparison as indicative only: H.264 is lossy, so it can both hide
-real differences and report differences that no viewer can see. Use
-`latent_parity.py` for anything you care about.
+Has each worker decode its chunks and rank 0 decode the same slices itself, then
+compares them, with `--handover` rebuilding the worker VAE from rank 0's
+broadcast weights exactly as the group does. Expect every chunk `exact=True`.
+
+### Do not compare encoded video
+
+`tests/selftest.py` runs a job both ways end to end, but it is only a smoke test.
+Hashing the output video proves nothing: the encoded container is **not
+byte-reproducible**. Three runs of the identical stock pipeline, same seed and
+same inputs, produced three different hashes (`529324c6…` at 736142 bytes,
+`c1c1c01c…` and `1bd76f6c…` both at 736204 bytes). A hash comparison there will
+report failures that do not exist, and can hide ones that do.
 
 ## Profiling
 

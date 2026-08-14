@@ -23,6 +23,7 @@ import torch
 import torch.distributed as dist
 
 from . import sp_forward as spf
+from . import sp_vae as spv
 
 REF_META_KEYS = ("kind", "latent_h", "latent_w", "latent_t", "ref_audio_t")
 TO_WORKER_OPTIONS = ("minimax_h3_sigma_shift_video", "minimax_h3_sigma_shift_audio")
@@ -104,6 +105,7 @@ class SPGroup:
         self.procs = []
         self.log_paths = {}
         self.n_forward = 0
+        self.vae_sent = False
         comfy_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp_worker.py")
         log_dir = os.environ.get("MINIMAX_SP_LOGDIR") or tempfile.gettempdir()
@@ -169,6 +171,103 @@ class SPGroup:
             self.destroy()
             raise
 
+    def send_vae(self, fsm, device):
+        """Hand the video VAE weights to the workers once, so no filename is guessed."""
+        sd = fsm.state_dict()
+        manifest = [(k, list(v.shape), str(v.dtype).replace("torch.", "")) for k, v in sd.items()]
+        dist.broadcast_object_list([{"op": "vae_load", "manifest": manifest}],
+                                   src=0, group=self.obj_pg)
+        for k, _, _ in manifest:
+            dist.broadcast(sd[k].to(device).contiguous(), src=0)
+        dist.barrier()
+        total = sum(v.numel() * v.element_size() for v in sd.values())
+        logging.info(f"[minimax_sp] sent video VAE to workers ({total / 2**30:.2f} GiB)")
+        self.vae_sent = True
+
+    def vae_decode(self, vae, samples):
+        """Decode the latent with the temporal chunks spread over the group.
+
+        Returns None when there is nothing to gain, so the caller can fall back to
+        the stock single-GPU decode.
+        """
+        self.check_alive()
+        fsm = vae.first_stage_model
+        pad_tokens, bounds = spv.chunk_plan(fsm, samples.shape[2])
+        if len(bounds) < 2 or samples.shape[2] == 1:
+            return None
+
+        try:
+            device = vae.device
+            if not self.vae_sent:
+                self.send_vae(fsm, device)
+
+            z = samples.to(device=device, dtype=vae.vae_dtype)
+            dtype = str(z.dtype).replace("torch.", "")
+            dist.broadcast_object_list([{"op": "vae_decode", "z": tensor_meta(z),
+                                         "dtype": dtype}], src=0, group=self.obj_pg)
+            dist.broadcast(z.contiguous(), src=0)
+
+            prepared = spv.prepare_latent(fsm, z, pad_tokens)
+            t_local = time.perf_counter()
+            chunks = spv.decode_local(fsm, prepared, bounds, 0, self.world)
+            torch.cuda.synchronize()
+            t_wait = time.perf_counter()
+
+            recvs = []
+            for i, (t0, t1) in enumerate(bounds):
+                owner = i % self.world
+                if owner == 0:
+                    continue
+                buf = torch.empty(spv.chunk_shape(fsm, prepared, t0, t1),
+                                  dtype=chunks[0].dtype if chunks else z.dtype, device=device)
+                recvs.append((i, buf, dist.irecv(buf, src=owner)))
+            for i, buf, req in recvs:
+                req.wait()
+                chunks[i] = buf
+
+            if os.environ.get("MINIMAX_SP_VAE_VERIFY"):
+                for i, (t0, t1) in enumerate(bounds):
+                    ref = fsm._adaptive_decode(prepared[:, :, t0:t1])
+                    d = (chunks[i].float() - ref.float()).abs().max().item()
+                    logging.info(f"[minimax_sp][vae] chunk {i} owner {i % self.world} "
+                                 f"shape {tuple(chunks[i].shape)} max_abs={d:.3e}")
+
+            served = {"n": 0}
+
+            def serve(clip_z):
+                i = served["n"]
+                served["n"] += 1
+                got = chunks.get(i)
+                if got is not None and got.shape[2] == clip_z.shape[2] * fsm.vae_ratio_t:
+                    return got
+                logging.warning(f"[minimax_sp] vae chunk {i} did not match the plan, "
+                                "decoding it locally")
+                return fsm._adaptive_decode(clip_z)
+
+            original = fsm._adaptive_decode
+            fsm._adaptive_decode = serve
+            t_assemble = time.perf_counter()
+            try:
+                out = vae.decode(samples)
+            finally:
+                fsm._adaptive_decode = original
+            torch.cuda.synchronize()
+            logging.info(
+                f"[minimax_sp] vae decode: {len(bounds)} chunks, "
+                f"{len(bounds) - len(recvs)} local, local={t_wait - t_local:.2f}s "
+                f"recv={t_assemble - t_wait:.2f}s assemble={time.perf_counter() - t_assemble:.2f}s")
+            if os.environ.get("MINIMAX_SP_VAE_VERIFY"):
+                ref_out = vae.decode(samples)
+                d = (out.float() - ref_out.float()).abs()
+                logging.info(f"[minimax_sp][vae] final pixels {tuple(out.shape)} "
+                             f"exact={torch.equal(out, ref_out)} max_abs={d.max().item():.3e} "
+                             f"differing={int((d > 0).sum())}/{d.numel()}")
+            return out
+        except Exception:
+            logging.exception("[minimax_sp] sharded vae decode failed, tearing down the group")
+            self.destroy()
+            raise
+
     def destroy(self):
         self.shutdown()
         for key, group in list(_GROUPS.items()):
@@ -192,6 +291,11 @@ class SPGroup:
             dist.destroy_process_group()
         except Exception:
             pass
+
+
+def active_group():
+    """The SP group currently running, if any. Only one exists per process."""
+    return next(iter(_GROUPS.values()), None)
 
 
 def get_group(world, unet_name, weight_dtype, devices=None):

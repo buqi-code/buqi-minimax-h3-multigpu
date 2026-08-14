@@ -19,6 +19,7 @@ import comfy.sd
 import folder_paths
 
 from . import sp_group
+from . import sp_vae
 
 try:
     from comfy.ldm.minimax.model import MiniMaxH3Model  # noqa: F401
@@ -117,9 +118,48 @@ class MiniMaxH3SPUNETLoader(io.ComfyNode):
         return io.NodeOutput(model)
 
 
+class MiniMaxH3SPVAEDecode(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3SPVAEDecode",
+            display_name="MiniMax H3 Multi-GPU VAE Decode",
+            category="advanced/multigpu",
+            description="Drop-in VAEDecode that spreads the video VAE's temporal chunks "
+                        "across the GPUs of a running MiniMax H3 SP group. Falls back to "
+                        "the stock decode when that is not possible. Costs each worker the "
+                        "video VAE weights (~5 GB) on top of the DiT.",
+            inputs=[
+                io.Latent.Input("samples"),
+                io.Vae.Input("vae"),
+            ],
+            outputs=[io.Image.Output()],
+        )
+
+    @classmethod
+    def execute(cls, samples, vae) -> io.NodeOutput:
+        latent = samples["samples"]
+        if getattr(latent, "is_nested", False):
+            latent = latent.unbind()[0]
+        group = sp_group.active_group()
+        images = None
+        if group is None:
+            logging.info("[minimax_sp] no SP group running, decoding the VAE on one GPU")
+        elif group.world > 1 and sp_vae.is_supported(vae):
+            images = group.vae_decode(vae, latent)
+            if images is None:
+                logging.info("[minimax_sp] too few temporal chunks to shard, "
+                             "decoding the VAE on one GPU")
+        if images is None:
+            images = vae.decode(latent)
+        if images.ndim == 5:
+            images = images.reshape(-1, *images.shape[-3:])
+        return io.NodeOutput(images)
+
+
 class MiniMaxSPExtension(ComfyExtension):
     async def get_node_list(self):
-        return [MiniMaxH3SPUNETLoader]
+        return [MiniMaxH3SPUNETLoader, MiniMaxH3SPVAEDecode]
 
 
 async def comfy_entrypoint() -> ComfyExtension:
