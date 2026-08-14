@@ -3,13 +3,22 @@
 [English](README.md) | **中文** | [日本語](README_ja.md)
 
 ComfyUI 上 **MiniMax-H3** 的多卡(序列并行)推理节点 —— 替换 `UNETLoader` 即可使用,
-**输出逐比特一致**,零质量损失。
+**无任何近似、无精度降低**。
 
 MiniMax-H3 用一个打包 token 的 DiT 同时生成**视频+音频**。本节点按
-[DeepSpeed-Ulysses](https://arxiv.org/abs/2309.14509) 的 all-to-all 方案把该序列
-切分到 2/4/7/8 张 GPU:每张卡对自己分到的一批注意力头做**完整精确的注意力**,
-数学上完全等价 —— 多卡结果与单卡逐比特一致(已验证,可用
-`tests/selftest.py` 在你自己的机器上复验)。
+[DeepSpeed-Ulysses](https://arxiv.org/abs/2309.14509) 方案把该序列切分到 2/4/7/8
+张 GPU:每张卡对自己分到的一批注意力头做**完整精确的注意力**,数学上完全等价。
+
+### 关于精度
+
+每张卡仍然在完整序列上做精确注意力,没有任何近似、额外量化、掩码或缓存。因此结果与
+单卡**数学等价**,但**并非逐比特相同**:每个 rank 只处理 56/`world_size` 个注意力头,
+而注意力 kernel 会根据头数选择归约顺序,浮点舍入落点因此不同。在 DiT 输出上实测,与
+单卡的偏差为**相对 ≤ 4.2e-6**(音频为 0),比 bf16 的机器精度(7.8e-3)小三个数量级,
+且无系统性偏向。
+
+可用 `tests/latent_parity.py` 自行复验 —— 它比较 DiT 实际输出的速度场张量,而不是编码
+后视频的哈希(H.264 有损,这个量级的差异它既可能掩盖也可能放大)。
 
 优先适配社区最常见配置:**双卡**(1~8 卡均可)。
 
@@ -71,19 +80,27 @@ API 格式示例见 [`examples/workflow_api_2gpu.json`](examples/workflow_api_2g
 | fp8(推荐) | ~21GB | 24GB 卡可跑至 720p,480p 宽裕 |
 | bf16(bf16 权重 + `default`) | ~40GB | 48GB 及以上 |
 
-实测(RTX PRO 5000 48GB,fp8,20 步,端到端秒):
 
-| 档位 | 单卡 | SP2 | 加速 |
+
+| 阶段 | 单卡 | SP2 | 加速 |
 |---|---|---|---|
-| 480p × 5s | 89.3 | 62.3 | 1.43× |
-| 720p × 5s | 300.8 | 223.5 | 1.35× |
-| 720p × 10s | 867.6 | 403.7 | 2.15× |
-| 1080p × 5s | 1127.4 | 375.6 | 3.00× |
+| 去噪循环 | 78.5s | 43.6s | **1.80×** |
+| VAE 解码(未并行) | 5.9s | 5.9s | 1.00× |
+| 端到端 | 89.2s | 55.7s | **1.60×** |
 
-双卡加速比偏低属预期:仅 2 路时每步 all-to-all 开销摊得少,且短视频里采样
-占比小(VAE 解码串行)。视频更长、分辨率更高时扩展性更好(8 卡实测最高 6.9×)。
+测试环境:2× RTX PRO 5000 Blackwell(72GB,PCIe 5.0,**无 NVLink**),fp8,
+832×480,20 步。
 
-PCIe / 无 NVLink 的机器可用(已在 RTX 5090 验证),扩展性略低于上表。
+算子级剖析(`MINIMAX_SP_PROFILE_OPS=1`,每步每卡):attention 812ms、MLP 646ms、
+gather+qkv_proj 316ms、输出 all-to-all 115ms、out_proj 81ms、调制+norm 76ms。
+主干 GEMM 已跑到 270–370 TFLOPS(fp8),attention 约 176 TFLOPS,**算子本身已无空间**;
+唯一不随卡数摊薄的就是卡间通信,经 `all_gather` 改造与重叠后已从约 34% 降到约 20%。
+
+端到端加速比受限于仍在单卡上跑的尾部:VAE 解码(此处 5.9s)与封装。视频更长、
+分辨率更高时扩展性更好,因为去噪时间增长而这段尾巴基本不变。
+
+更大画幅(1080p 及以上)还会因为激活被切分而受益:单卡可能已经在做显存换页,
+而 SP2 仍完全驻留。这类场景看起来"超线性"是这个原因,不是序列并行突破了自身上限。
 
 ## 分辨率约束
 
@@ -93,16 +110,38 @@ PCIe / 无 NVLink 的机器可用(已在 RTX 5090 验证),扩展性略低于上�
 
 ## 在你机器上验证正确性
 
+真正有意义的检查是比对 DiT 的实际输出:
+
 ```bash
-# 服务运行时:
-python custom_nodes/buqi-minimax-h3-multigpu/tests/selftest.py \
-    --server http://127.0.0.1:18188 --sp 2 \
+cd custom_nodes/buqi-minimax-h3-multigpu
+torchrun --nproc_per_node=2 tests/latent_parity.py \
+    --unet minimax_h3_fl2va_pruned_fp8_scaled.safetensors
+```
+
+它以官方单卡 `_forward` 为基准,对同一输入跑两种通信策略的并行前向,输出最大绝对
+与相对偏差。预期看到 `ag vs a2a … exact=True`(两种策略完全一致),以及 `vs 1gpu`
+的相对偏差约 4e-6。
+
+另外有一个端到端冒烟测试,各跑一遍并比对输出视频:
+
+```bash
+python tests/selftest.py --server http://127.0.0.1:18188 --sp 2 \
     --unet minimax_h3_fl2va_pruned_fp8_scaled.safetensors \
     --image your_first_frame.png
 ```
 
-用完全相同的输入分别跑一次单卡、一次双卡,比对输出视频的 SHA-256。
-看到 `PASS: sp2 output is bit-identical` 即通过。
+它的哈希比对只能当参考:H.264 有损,既可能掩盖真实差异,也可能报出肉眼不可见的
+差异。真正要确认精度请用 `latent_parity.py`。
+
+## 性能剖析
+
+```bash
+MINIMAX_SP_PROFILE_OPS=1 MINIMAX_SP_PROFILE=1 python main.py --cuda-device 0,1 --highvram
+```
+
+会按区域(注意力、MLP、gather、通信……)打印每步耗时,以及每步的调度开销 ——
+上面的调优就是基于这些数据做的。`tests/profile_phases.py` 通过 websocket API
+在节点粒度上做同样的事。
 
 ## 环境变量
 
@@ -110,6 +149,9 @@ python custom_nodes/buqi-minimax-h3-multigpu/tests/selftest.py \
 |---|---|
 | `MINIMAX_SP_DEVICES` | `devices=auto` 时的备选卡表,如 `0,1` |
 | `MINIMAX_SP_LOGDIR` | worker 日志目录(默认系统临时目录) |
+| `MINIMAX_SP_AG_CHUNKS` | 隐状态 gather 拆成几个子块以与投影重叠(默认 4;设 1 关闭重叠) |
+| `MINIMAX_SP_PROFILE` | 打印每步调度与前向耗时 |
+| `MINIMAX_SP_PROFILE_OPS` | 打印每步按区域的耗时拆分 |
 
 ## 常见问题
 
@@ -125,10 +167,29 @@ python custom_nodes/buqi-minimax-h3-multigpu/tests/selftest.py \
 ## 原理
 
 H3 DiT 处理一条打包序列 `[text|cond|audio|video]`,共 56 个注意力头。Ulysses SP
-让序列按行切分常驻各卡:所有逐 token 运算(patch proj、AdaLN、RoPE、MLP)
-都是行内本地计算,无需通信;只有注意力跨卡,通过两次 all-to-all 把"头维"换成
-"序列维" —— 每卡随后对自己负责的 56/P 个头在**完整序列**上做精确注意力。
-无近似、无掩码、无损失。
+让序列按行切分常驻各卡:所有逐 token 运算(patch proj、调制、RoPE、MLP)都是行内
+本地计算,无需通信;只有注意力跨卡 —— 每卡最终对自己负责的 56/`world_size` 个头在
+**完整序列**上做精确注意力。
+
+让"头"和"序列"对齐有两种做法,哪种更省取决于卡数:
+
+- **all-to-all**(经典 Ulysses):在本地行上算出全部 56 头的 Q/K/V,再把"头维"换成
+  "序列维"。每行搬运 `3 × inner / world` 字节。
+- **all_gather**(`world_size ≤ 4` 时启用):改为广播调制后的隐状态,然后只用本卡
+  那部分 `qkv_proj` 权重行去投影。每行搬运 `hidden` 字节,且 Q/K/V 出来就已经横跨
+  完整序列,**三次 transpose+拷贝彻底消失**。
+
+对 H3(`hidden` 5376、`inner` 7168),两者在 `world_size == 4` 时字节相等,小于 4 时
+all_gather 更优 —— 480p PCIe 实测:每 block 通信 6.04ms → 2.34ms,达成带宽从
+24.9 升到 32.2 GB/s(因为路径上不再有 permute)。大于 4 时仍走 all-to-all。
+
+按行切分 `qkv_proj` 是精确的而非近似:fp8 权重只带一个 per-tensor scale,所以选取
+若干行之后,每个输出元素仍是原来那个点积。代价是每卡多存该权重的 `1/world`
+(fp8、双卡时约 2.9GB)。
+
+最后,gather 被拆成若干异步子传输(`MINIMAX_SP_AG_CHUNKS`,默认 4),使每块的投影
+与下一块的传输重叠 —— 480p 上再省约 90ms/步。分块不改变任何算术:
+`tests/latent_parity.py` 在 1/2/4/8 块下均报告逐比特相同。
 
 ## 许可证
 

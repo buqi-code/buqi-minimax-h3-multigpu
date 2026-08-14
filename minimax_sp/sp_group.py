@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import timedelta
 
 import torch
@@ -102,6 +103,7 @@ class SPGroup:
         self.unet_name = unet_name
         self.procs = []
         self.log_paths = {}
+        self.n_forward = 0
         comfy_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp_worker.py")
         log_dir = os.environ.get("MINIMAX_SP_LOGDIR") or tempfile.gettempdir()
@@ -137,15 +139,29 @@ class SPGroup:
 
     def forward(self, dit, x, timestep, context, transformer_options, payload):
         self.check_alive()
+        profile = os.environ.get("MINIMAX_SP_PROFILE")
         try:
+            t_disp = time.perf_counter()
             meta = build_meta(x, timestep, context, transformer_options, payload)
             dist.broadcast_object_list([meta], src=0, group=self.obj_pg)
+            t_meta = time.perf_counter()
             device = x[0].device
             for t in ordered_tensors(x, timestep, context, payload):
                 if t is not None:
                     dist.broadcast(t.to(device).contiguous(), src=0)
-            return spf.sp_forward(dit, x, timestep, context, transformer_options, payload,
-                                  0, self.world, None)
+            if profile:
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            out = spf.sp_forward(dit, x, timestep, context, transformer_options, payload,
+                                 0, self.world, None)
+            if profile:
+                torch.cuda.synchronize()
+                logging.info(f"[minimax_sp][profile] step {self.n_forward}: "
+                             f"meta_bcast={1000 * (t_meta - t_disp):.1f}ms "
+                             f"tensor_bcast={1000 * (t0 - t_meta):.1f}ms "
+                             f"sp_forward={1000 * (time.perf_counter() - t0):.1f}ms")
+                self.n_forward += 1
+            return out
         except Exception:
             # ranks are desynchronized past this point; drop the group so the next
             # prompt respawns a clean one instead of hanging on a collective
@@ -178,11 +194,13 @@ class SPGroup:
             pass
 
 
-def get_group(world, unet_name, weight_dtype):
-    key = (world, unet_name, weight_dtype)
+def get_group(world, unet_name, weight_dtype, devices=None):
+    key = (world, unet_name, weight_dtype, tuple(devices) if devices else None)
     if key not in _GROUPS:
         if _GROUPS:
             raise RuntimeError("[minimax_sp] a different SP group is already running; restart ComfyUI "
                                f"to change it (active: {list(_GROUPS)[0]})")
-        _GROUPS[key] = SPGroup(world, unet_name, weight_dtype)
+        if devices is None:
+            raise ValueError("[minimax_sp] devices must be provided for a new SP group")
+        _GROUPS[key] = SPGroup(world, unet_name, weight_dtype, devices)
     return _GROUPS[key]

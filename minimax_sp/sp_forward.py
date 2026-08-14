@@ -14,6 +14,12 @@ Pinned to ComfyUI 0.30.0's comfy/ldm/minimax/model.py; sp_forward mirrors
 MiniMaxH3Model._forward and must be re-checked when that file changes.
 """
 
+import copy
+import dataclasses
+import logging
+import os
+import time
+
 import torch
 import torch.distributed as dist
 
@@ -36,6 +42,93 @@ from comfy.ldm.minimax.model import (
 from comfy.ldm.modules.attention import optimized_attention
 
 EXPECTED_MODEL_SHA = "pinned to ComfyUI 0.30.0"
+
+PROFILE_OPS = bool(os.environ.get("MINIMAX_SP_PROFILE_OPS"))
+AG_CHUNKS = max(1, int(os.environ.get("MINIMAX_SP_AG_CHUNKS", "4")))
+_prof_acc = {}
+
+
+class region:
+    """Accumulate wall time per named region; only active under MINIMAX_SP_PROFILE_OPS."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __enter__(self):
+        if PROFILE_OPS:
+            torch.cuda.synchronize()
+            self.t0 = time.perf_counter()
+        return self
+
+    def __exit__(self, *exc):
+        if PROFILE_OPS:
+            torch.cuda.synchronize()
+            _prof_acc[self.name] = _prof_acc.get(self.name, 0.0) + time.perf_counter() - self.t0
+        return False
+
+
+def prof_report(total):
+    rows = sorted(_prof_acc.items(), key=lambda kv: -kv[1])
+    body = "  ".join(f"{k}={v * 1000:.0f}ms" for k, v in rows)
+    logging.info(f"[minimax_sp][ops] step={total * 1000:.0f}ms  {body}")
+    _prof_acc.clear()
+
+
+def use_allgather(world, hidden, inner):
+    """Broadcasting h beats swapping Q/K/V while hidden < 3*inner/world.
+
+    For H3 (hidden 5376, inner 7168) the two cost the same bytes at world 4 and
+    below that the all_gather path additionally removes three full permute copies.
+    """
+    return 1 < world <= (3 * inner) // hidden
+
+
+def head_sharded_qkv(proj, world, rank):
+    """Row-slice qkv_proj down to this rank's heads, keeping fp8 storage.
+
+    The weight carries one per-tensor scale, so selecting rows is exact: every
+    output element remains the dot product it was on a single GPU. Cached on the
+    module so it is freed with the model.
+    """
+    cached = getattr(proj, "_sp_shard", None)
+    if cached is not None and cached[0] == (world, rank):
+        return cached[1]
+
+    w = proj.weight
+    inner = w.shape[0] // 3
+    span = inner // world
+    lo = rank * span
+    idx = torch.cat([torch.arange(lo, lo + span, device=w.device) + off * inner
+                     for off in range(3)])
+
+    sub = copy.copy(proj)
+    sub._parameters = dict(proj._parameters)
+    del sub._parameters["weight"]
+    if type(w).__name__ == "QuantizedTensor":
+        qd = w._qdata[idx].contiguous()
+        params = dataclasses.replace(w._params, orig_shape=(qd.shape[0], w.shape[1]))
+        sub.weight = type(w)(qd, w._layout_cls, params)
+    else:
+        sub.weight = w[idx].contiguous()
+    sub.out_features = idx.numel()
+    proj._sp_shard = ((world, rank), sub)
+    return sub
+
+
+def gather_rows_full(local, ctx):
+    """[s_local, C] -> [S_total, C] in rank order, tolerating uneven row splits."""
+    c = local.shape[1]
+    maxn = max(ctx.splits)
+    if min(ctx.splits) == maxn:
+        out = torch.empty(ctx.world * maxn, c, dtype=local.dtype, device=local.device)
+        dist.all_gather_into_tensor(out, local.contiguous(), group=ctx.group)
+        return out
+    buf = torch.zeros(maxn, c, dtype=local.dtype, device=local.device)
+    buf[:local.shape[0]] = local
+    out = torch.empty(ctx.world * maxn, c, dtype=local.dtype, device=local.device)
+    dist.all_gather_into_tensor(out, buf, group=ctx.group)
+    out = out.view(ctx.world, maxn, c)
+    return torch.cat([out[r, :ctx.splits[r]] for r in range(ctx.world)], dim=0)
 
 
 class SPContext:
@@ -88,44 +181,139 @@ def a2a_scatter_seq_gather_heads(t, ctx):
     return out.view(p, s_local, chunk).transpose(0, 1).reshape(s_local, p * chunk)
 
 
+def gather_and_project(attn_proj, x, ctx, chunks, out_dim):
+    """all_gather h and project it, with the transfers overlapping the projection.
+
+    Chunk i holds the same row window from every rank, so its projected rows are
+    written back at each rank's global offset and the result lands in exactly the
+    row order a single GPU would produce. Row splits are uneven when the sequence
+    does not divide by world, and all_gather needs equal contributions, so the
+    local block is padded up to the largest split and the padding is dropped on
+    write-back.
+    """
+    s_local, hidden = x.shape
+    if chunks <= 1:
+        return attn_proj(gather_rows_full(x, ctx))
+
+    maxn = max(ctx.splits)
+    if s_local == maxn:
+        src = x
+    else:
+        src = torch.zeros(maxn, hidden, dtype=x.dtype, device=x.device)
+        src[:s_local] = x
+
+    span = -(-maxn // chunks)
+    starts = [sum(ctx.splits[:r]) for r in range(ctx.world)]
+    pending = []
+    for a in range(0, maxn, span):
+        b = min(a + span, maxn)
+        buf = torch.empty(ctx.world * (b - a), hidden, dtype=x.dtype, device=x.device)
+        work = dist.all_gather_into_tensor(buf, src[a:b].contiguous(), group=ctx.group,
+                                          async_op=True)
+        pending.append((a, b, buf, work))
+
+    out = torch.empty(ctx.seq_len, out_dim, dtype=x.dtype, device=x.device)
+    for a, b, buf, work in pending:
+        work.wait()
+        piece = attn_proj(buf)
+        m = b - a
+        for r in range(ctx.world):
+            n = min(b, ctx.splits[r]) - a
+            if n > 0:
+                out[starts[r] + a:starts[r] + a + n] = piece[r * m:r * m + n]
+    return out
+
+
+def sp_attention_allgather(attn, x, rope_full, ctx, transformer_options, chunks=None):
+    """Ulysses attention that broadcasts h instead of swapping Q/K/V.
+
+    Each rank projects the whole sequence through only its own head rows, so Q/K/V
+    come out already gathered over the sequence: no head/seq transpose, no QKV
+    all-to-all, and only this rank's slice of qkv_proj has to be resident.
+    """
+    heads, dim = attn.heads, attn.head_dim
+    hp = heads // ctx.world
+    proj = head_sharded_qkv(attn.qkv_proj, ctx.world, ctx.rank)
+    with region("gather+qkv_proj"):
+        qkv = gather_and_project(proj, x, ctx, AG_CHUNKS if chunks is None else chunks,
+                                 3 * hp * dim)
+    s = qkv.shape[0]
+    with region("qknorm+rope"):
+        q, k, v = qkv.split(hp * dim, dim=-1)
+        v = v.view(s, hp, dim)
+        if rope_full is not None:
+            q = q.view(1, s, hp, dim)
+            k = k.view(1, s, hp, dim)
+            qw = comfy.model_management.cast_to(attn.q_norm.weight, device=x.device)
+            kw = comfy.model_management.cast_to(attn.k_norm.weight, device=x.device)
+            rot = rope_full.shape[-3] * 2
+            comfy.quant_ops.ck.rms_rope_split_half_(
+                q, k, rope_full, qw, kw, epsilon=attn.q_norm.eps, rot_dim=rot)
+            q = q[0]
+            k = k[0]
+        else:
+            q = attn.q_norm(q.view(s, hp, dim))
+            k = attn.k_norm(k.view(s, hp, dim))
+    with region("attn"):
+        out = optimized_attention(
+            q.transpose(0, 1).unsqueeze(0), k.transpose(0, 1).unsqueeze(0), v.transpose(0, 1).unsqueeze(0),
+            hp, mask=None, skip_reshape=True, transformer_options=transformer_options)
+    with region("a2a_out"):
+        out = a2a_scatter_seq_gather_heads(out.squeeze(0), ctx)
+    with region("out_proj"):
+        return attn.out_proj(out)
+
+
 def sp_attention(attn, x, rope_freqs, ctx, transformer_options):
     s = x.shape[0]
     heads, dim = attn.heads, attn.head_dim
-    q, k, v = attn.qkv_proj(x).split(heads * dim, dim=-1)
-    v = v.view(s, heads, dim)
-    if rope_freqs is not None:
-        q = q.view(1, s, heads, dim)
-        k = k.view(1, s, heads, dim)
-        qw = comfy.model_management.cast_to(attn.q_norm.weight, device=x.device)
-        kw = comfy.model_management.cast_to(attn.k_norm.weight, device=x.device)
-        rot = rope_freqs.shape[-3] * 2
-        comfy.quant_ops.ck.rms_rope_split_half_(
-            q, k, rope_freqs, qw, kw, epsilon=attn.q_norm.eps, rot_dim=rot)
-        q = q[0]
-        k = k[0]
-    else:
-        q = attn.q_norm(q.view(s, heads, dim))
-        k = attn.k_norm(k.view(s, heads, dim))
+    with region("qkv_proj+qknorm+rope"):
+        q, k, v = attn.qkv_proj(x).split(heads * dim, dim=-1)
+        v = v.view(s, heads, dim)
+        if rope_freqs is not None:
+            q = q.view(1, s, heads, dim)
+            k = k.view(1, s, heads, dim)
+            qw = comfy.model_management.cast_to(attn.q_norm.weight, device=x.device)
+            kw = comfy.model_management.cast_to(attn.k_norm.weight, device=x.device)
+            rot = rope_freqs.shape[-3] * 2
+            comfy.quant_ops.ck.rms_rope_split_half_(
+                q, k, rope_freqs, qw, kw, epsilon=attn.q_norm.eps, rot_dim=rot)
+            q = q[0]
+            k = k[0]
+        else:
+            q = attn.q_norm(q.view(s, heads, dim))
+            k = attn.k_norm(k.view(s, heads, dim))
 
     hp = heads // ctx.world
-    q = a2a_scatter_heads_gather_seq(q, ctx)
-    k = a2a_scatter_heads_gather_seq(k, ctx)
-    v = a2a_scatter_heads_gather_seq(v, ctx)
-    out = optimized_attention(
-        q.transpose(0, 1).unsqueeze(0), k.transpose(0, 1).unsqueeze(0), v.transpose(0, 1).unsqueeze(0),
-        hp, mask=None, skip_reshape=True, transformer_options=transformer_options)
-    out = a2a_scatter_seq_gather_heads(out.squeeze(0), ctx)
-    return attn.out_proj(out)
+    with region("a2a_qkv"):
+        q = a2a_scatter_heads_gather_seq(q, ctx)
+        k = a2a_scatter_heads_gather_seq(k, ctx)
+        v = a2a_scatter_heads_gather_seq(v, ctx)
+    with region("attn"):
+        out = optimized_attention(
+            q.transpose(0, 1).unsqueeze(0), k.transpose(0, 1).unsqueeze(0), v.transpose(0, 1).unsqueeze(0),
+            hp, mask=None, skip_reshape=True, transformer_options=transformer_options)
+    with region("a2a_out"):
+        out = a2a_scatter_seq_gather_heads(out.squeeze(0), ctx)
+    with region("out_proj"):
+        return attn.out_proj(out)
 
 
-def sp_block(block, x, t_emb, mod_segments, rope_freqs, ctx, transformer_options):
+def sp_block(block, x, t_emb, mod_segments, rope_freqs, ctx, transformer_options, allgather=False):
     from comfy.ldm.minimax.model import _mod_gate, _mod_scale_shift
 
-    shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = block.adaln_proj(t_emb)
-    h = _mod_scale_shift(block.norm1(x), shift_msa, scale_msa, mod_segments)
-    x = _mod_gate(x, gate_msa, sp_attention(block.attn, h, rope_freqs, ctx, transformer_options), mod_segments)
-    h = _mod_scale_shift(block.norm2(x), shift_mlp, scale_mlp, mod_segments)
-    return _mod_gate(x, gate_mlp, block.mlp(h), mod_segments)
+    with region("adaln+norm+mod"):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = block.adaln_proj(t_emb)
+        h = _mod_scale_shift(block.norm1(x), shift_msa, scale_msa, mod_segments)
+    attn = sp_attention_allgather if allgather else sp_attention
+    attn_out = attn(block.attn, h, rope_freqs, ctx, transformer_options)
+    with region("adaln+norm+mod"):
+        x = _mod_gate(x, gate_msa, attn_out, mod_segments)
+        h = _mod_scale_shift(block.norm2(x), shift_mlp, scale_mlp, mod_segments)
+    with region("mlp"):
+        mlp_out = block.mlp(h)
+    with region("adaln+norm+mod"):
+        return _mod_gate(x, gate_mlp, mlp_out, mod_segments)
 
 
 def shard_segments(segments, start, stop):
@@ -156,7 +344,7 @@ def _gather_rows(local, counts, ctx, out_dim, device):
     if local is not None:
         buf[:local.shape[0]] = local
     gathered = torch.empty(ctx.world * maxn, out_dim, dtype=torch.float32, device=buf.device)
-    dist.all_gather_single(gathered, buf, group=ctx.group)
+    dist.all_gather_into_tensor(gathered, buf, group=ctx.group)
     gathered = gathered.view(ctx.world, maxn, out_dim)
     return torch.cat([gathered[r, :counts[r]] for r in range(ctx.world) if counts[r] > 0], dim=0)
 
@@ -166,6 +354,7 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
 
     Returns [video_velocity, audio_velocity] on rank 0, None elsewhere.
     """
+    t_fwd = time.perf_counter()
     video_x, audio_x = x[0], x[1]
     orig_t, orig_h, orig_w = video_x.shape[2], video_x.shape[3], video_x.shape[4]
     video_x = comfy.ldm.common_dit.pad_to_patch_size(video_x, dit.patch_size)
@@ -269,13 +458,21 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
         t_emb = dit.time_embedder(t_vals).to(dtype)
 
     rope_freqs = rope_rotation_table(dit.rope_freqs(layout.position_ids, device), dtype)
-    rope_local = rope_freqs[:, ctx.start:ctx.stop].contiguous()
     local_segments = shard_segments(mod_segments, ctx.start, ctx.stop)
+
+    allgather = use_allgather(world, dit.hidden_size,
+                              dit.blocks[0].attn.heads * dit.blocks[0].attn.head_dim)
+    rope_for_blocks = rope_freqs if allgather else rope_freqs[:, ctx.start:ctx.stop].contiguous()
+
+    if PROFILE_OPS:
+        torch.cuda.synchronize()
+        _prof_acc["pre"] = time.perf_counter() - t_fwd
 
     prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(dit.blocks), device, transformer_options)
     for block in dit.blocks:
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block)
-        h = sp_block(block, h, t_emb, local_segments, rope_local, ctx, transformer_options)
+        h = sp_block(block, h, t_emb, local_segments, rope_for_blocks, ctx, transformer_options,
+                     allgather=allgather)
     if prefetch_queue is not None:
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None)
 
@@ -292,13 +489,16 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
             s += n
         return out
 
-    hv, _ = _local_final_layer(dit.final_layer, h, t_emb, video_seg, ctx.start, ctx.stop)
-    ha, _ = _local_final_layer(dit.final_layer, h, t_emb, audio_seg, ctx.start, ctx.stop)
-    v_local = dit.final_layer.video_out(hv) if hv is not None else None
-    a_local = dit.final_layer.audio_out(ha) if ha is not None else None
+    with region("final+gather"):
+        hv, _ = _local_final_layer(dit.final_layer, h, t_emb, video_seg, ctx.start, ctx.stop)
+        ha, _ = _local_final_layer(dit.final_layer, h, t_emb, audio_seg, ctx.start, ctx.stop)
+        v_local = dit.final_layer.video_out(hv) if hv is not None else None
+        a_local = dit.final_layer.audio_out(ha) if ha is not None else None
 
-    v = _gather_rows(v_local, counts_for(video_seg), ctx, dit.final_layer.video_out.out_features, device)
-    a = _gather_rows(a_local, counts_for(audio_seg), ctx, dit.final_layer.audio_out.out_features, device)
+        v = _gather_rows(v_local, counts_for(video_seg), ctx, dit.final_layer.video_out.out_features, device)
+        a = _gather_rows(a_local, counts_for(audio_seg), ctx, dit.final_layer.audio_out.out_features, device)
+    if PROFILE_OPS and rank == 0:
+        prof_report(time.perf_counter() - t_fwd)
     if rank != 0:
         return None
 

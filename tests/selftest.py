@@ -77,13 +77,19 @@ async def run_one(session, a, sp):
             data = m.get("data", {})
             if data.get("prompt_id") != pid:
                 continue
-            if m.get("type") == "status" and not data.get("status", {}).get("exec_info", {}).get("queue_remaining", 1):
+            if m.get("type") == "executing" and data.get("node") is None:
                 break
+            if m.get("type") == "execution_error":
+                raise RuntimeError(f"[sp{sp}] execution_error: {json.dumps(data)[:600]}")
         hist = await (await session.get(f"{a.server}/history/{pid}")).json()
         entry = hist.get(pid)
         if entry is None or entry.get("status", {}).get("status_str") != "success":
             raise RuntimeError(f"[sp{sp}] job failed: {json.dumps(entry)[:500] if entry else 'no history entry'}")
-        fn = entry["outputs"]["save"]["videos"][0]
+        out = entry["outputs"]["save"]
+        files = out.get("videos") or out.get("images")
+        if not files:
+            raise RuntimeError(f"[sp{sp}] SaveVideo produced no file: {json.dumps(out)[:300]}")
+        fn = files[0]
         params = {"filename": fn["filename"], "subfolder": fn.get("subfolder", ""), "type": fn.get("type", "output")}
         blob = await (await session.get(f"{a.server}/view", params=params)).read()
         return hashlib.sha256(blob).hexdigest(), len(blob)
