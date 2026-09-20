@@ -10,8 +10,9 @@ Row splits are deliberately uneven (base + remainder) instead of padding the
 sequence, so no attention mask is needed and results stay numerically equivalent
 to the single-GPU path.
 
-Pinned to ComfyUI 0.30.0's comfy/ldm/minimax/model.py; sp_forward mirrors
-MiniMaxH3Model._forward and must be re-checked when that file changes.
+Originally pinned by buqi-code to ComfyUI 0.30.0. Local compatibility changes
+target ComfyUI 99073836 (0.36.0): see AUDIT.md and CHANGES_LOCAL.md.
+sp_forward mirrors MiniMaxH3Model._forward and must be re-checked when it changes.
 """
 
 import copy
@@ -31,17 +32,15 @@ from comfy.ldm.minimax.model import (
     AUDIO_COND_TIMESTEP,
     VISUAL_COND_TIMESTEP,
     PackedLayout,
+    mask_row_values,
     pack_audio,
     patchify_video,
     rope_rotation_table,
     time_shift_sigma,
-    time_shift_slope,
     unpack_audio,
     unpatchify_video,
 )
 from comfy.ldm.modules.attention import optimized_attention
-
-EXPECTED_MODEL_SHA = "pinned to ComfyUI 0.30.0"
 
 PROFILE_OPS = bool(os.environ.get("MINIMAX_SP_PROFILE_OPS"))
 AG_CHUNKS = max(1, int(os.environ.get("MINIMAX_SP_AG_CHUNKS", "4")))
@@ -375,19 +374,8 @@ def shard_segments(segments, start, stop):
     for a, b, row in segments:
         lo, hi = max(a, start), min(b, stop)
         if hi > lo:
-            out.append((lo - start, hi - start, row))
+            out.append((lo - start, hi - start, row[lo-a:hi-a] if torch.is_tensor(row) else row))
     return out
-
-
-def _local_final_layer(final_layer, h, t_emb, seg, start, stop):
-    """Run FinalLayer on this rank's slice of one target segment. Returns [n_local, out_dim]."""
-    a, b, row = seg
-    lo, hi = max(a, start), min(b, stop)
-    if hi <= lo:
-        return None, 0
-    shift, scale = final_layer.adaln_proj(t_emb)
-    x = h[lo - start:hi - start]
-    return (final_layer.norm(x) * (1.0 + scale[row]) + shift[row]).to(torch.float32), hi - lo
 
 
 def _gather_rows(local, counts, ctx, out_dim, device):
@@ -402,7 +390,8 @@ def _gather_rows(local, counts, ctx, out_dim, device):
     return torch.cat([gathered[r, :counts[r]] for r in range(ctx.world) if counts[r] > 0], dim=0)
 
 
-def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, rank, world, group):
+def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, rank, world, group,
+               denoise_mask=None, audio_denoise_mask=None):
     """Sequence-parallel mirror of MiniMaxH3Model._forward.
 
     Returns [video_velocity, audio_velocity] on rank 0, None elsewhere.
@@ -411,6 +400,8 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
     video_x, audio_x = x[0], x[1]
     orig_t, orig_h, orig_w = video_x.shape[2], video_x.shape[3], video_x.shape[4]
     video_x = comfy.ldm.common_dit.pad_to_patch_size(video_x, dit.patch_size)
+    if video_x.shape[0] != 1:
+        raise ValueError("MiniMax H3 supports batch size 1")
     payload = minimax_payload or {}
     device = video_x.device
     dtype = context.dtype
@@ -421,9 +412,7 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
     layout = payload.get("layout")
     if layout is None or layout.signature != (text_len, latent_t, lat_h, lat_w, audio_t):
         layout = PackedLayout(text_len, latent_t, lat_h, lat_w, audio_t,
-                              keyframes=payload.get("keyframes"),
-                              refs=payload.get("refs"),
-                              frame_count=payload.get("frame_count"))
+                              keyframes=payload.get("keyframes"), refs=payload.get("refs"))
 
     shift_v = float(transformer_options.get("minimax_h3_sigma_shift_video", dit.sigma_shift_video))
     shift_a = float(transformer_options.get("minimax_h3_sigma_shift_audio", dit.sigma_shift_audio))
@@ -433,15 +422,37 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
 
     vis_aug = float(payload.get("visual_cond_noise_aug", VISUAL_COND_TIMESTEP))
     aud_aug = float(payload.get("audio_cond_noise_aug", AUDIO_COND_TIMESTEP))
-    has_vis_cond = any(k in ("cond", "ref_img") for _, _, k in layout.segments)
-    has_aud_cond = any(k == "ref_audio" for _, _, k in layout.segments)
     seg_t = {"text": t_v, "video": t_v, "audio": t_a,
              "cond": max(t_v, vis_aug), "ref_img": max(t_v, vis_aug),
-             "ref_audio": max(t_a, aud_aug)}
-    unique_t = sorted({t_v, t_a} | ({seg_t["cond"]} if has_vis_cond else set())
-                      | ({seg_t["ref_audio"]} if has_aud_cond else set()))
+             "cond_audio": max(t_a, aud_aug), "ref_audio": max(t_a, aud_aug)}
+    # Current ComfyUI labels masked rows at their own stream sigma.
+    video_rows_t = audio_rows_t = None
+    if denoise_mask is not None:
+        m = mask_row_values(denoise_mask[0, 0].float(), latent_t, lat_h, lat_w)
+        if m is not None:
+            rows_t = (1.0 - m * sigma_v.to(m.device)).clamp(max=max(t_v, VISUAL_COND_TIMESTEP))
+            if rows_t.unique().numel() == 1:
+                seg_t["video"] = float(rows_t[0])
+            else:
+                video_rows_t = rows_t
+    if audio_denoise_mask is not None:
+        m = audio_denoise_mask[0, 0].float().reshape(-1)
+        if not bool((m >= 1.0 - 1e-3).all()):
+            rows_t = (1.0 - m * (1.0 - t_a)).clamp(max=max(t_a, AUDIO_COND_TIMESTEP))
+            if rows_t.unique().numel() == 1:
+                seg_t["audio"] = float(rows_t[0])
+            else:
+                audio_rows_t = rows_t
+    unique_t = sorted({t_v, t_a} | {seg_t[k] for _, _, k in layout.segments}
+                      | (set(video_rows_t.unique().tolist()) if video_rows_t is not None else set())
+                      | (set(audio_rows_t.unique().tolist()) if audio_rows_t is not None else set()))
     t_row = {t: i for i, t in enumerate(unique_t)}
-    seg_tag = {"text": 1, "video": 0, "audio": 2, "cond": 0, "ref_img": 0, "ref_audio": 2}
+    seg_tag = {"text": 1, "video": 0, "audio": 2, "cond": 0, "ref_img": 0, "cond_audio": 2, "ref_audio": 2}
+
+    def rows_to_mod_index(rows_t, tag):
+        levels = rows_t.unique()
+        base = torch.tensor([t_row[v] * 3 + tag for v in levels.tolist()], dtype=torch.long, device=rows_t.device)
+        return base[torch.searchsorted(levels, rows_t)]
 
     text_tags = payload.get("text_token_tags")
     mod_segments = []
@@ -454,8 +465,19 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
                 if i == b - a or tags[i] != tags[run_start]:
                     mod_segments.append((a + run_start, a + i, row_base + int(tags[run_start])))
                     run_start = i
+        elif kind == "video" and video_rows_t is not None:
+            mod_segments.append((a, b, rows_to_mod_index(video_rows_t, 0)))
+        elif kind == "audio" and audio_rows_t is not None:
+            mod_segments.append((a, b, rows_to_mod_index(audio_rows_t, 2)))
         else:
             mod_segments.append((a, b, row_base + seg_tag[kind]))
+
+    video_seg = next((a, b, t_row[seg_t["video"]]) for a, b, k in layout.segments if k == "video")
+    audio_seg = next((a, b, t_row[seg_t["audio"]]) for a, b, k in layout.segments if k == "audio")
+    if video_rows_t is not None:
+        video_seg = (*video_seg[:2], rows_to_mod_index(video_rows_t, 0) // 3)
+    if audio_rows_t is not None:
+        audio_seg = (*audio_seg[:2], rows_to_mod_index(audio_rows_t, 0) // 3)
 
     img_update = layout.img_update.to(device)
     audio_update = layout.audio_update.to(device)
@@ -510,12 +532,14 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
     else:
         t_emb = dit.time_embedder(t_vals).to(dtype)
 
+
     rope_freqs = rope_rotation_table(dit.rope_freqs(layout.position_ids, device), dtype)
     local_segments = shard_segments(mod_segments, ctx.start, ctx.stop)
 
-    allgather = use_allgather(world, dit.hidden_size,
-                              dit.blocks[0].attn.heads * dit.blocks[0].attn.head_dim)
-    rope_for_blocks = rope_freqs if allgather else rope_freqs[:, ctx.start:ctx.stop].contiguous()
+    if os.environ.get("MINIMAX_SP_EXCHANGE", "all_to_all") != "all_to_all":
+        raise RuntimeError("MiniMax SP requires all_to_all: head-sliced QKV is not validated for INT8 / LoRA")
+    allgather = False
+    rope_for_blocks = rope_freqs[:, ctx.start:ctx.stop].contiguous()
 
     if PROFILE_OPS:
         torch.cuda.synchronize()
@@ -529,9 +553,6 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
     if prefetch_queue is not None:
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None)
 
-    video_seg = next((a, b, t_row[seg_t["video"]]) for a, b, k in layout.segments if k == "video")
-    audio_seg = next((a, b, t_row[seg_t["audio"]]) for a, b, k in layout.segments if k == "audio")
-
     def counts_for(seg):
         a, b, _ = seg
         out = []
@@ -543,10 +564,15 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
         return out
 
     with region("final+gather"):
-        hv, _ = _local_final_layer(dit.final_layer, h, t_emb, video_seg, ctx.start, ctx.stop)
-        ha, _ = _local_final_layer(dit.final_layer, h, t_emb, audio_seg, ctx.start, ctx.stop)
-        v_local = dit.final_layer.video_out(hv) if hv is not None else None
-        a_local = dit.final_layer.audio_out(ha) if ha is not None else None
+        def local_seg(seg):
+            a, b, row = seg
+            lo, hi = max(a, ctx.start), min(b, ctx.stop)
+            if hi <= lo:
+                return (0, 0, row[:0] if torch.is_tensor(row) else row)
+            return (lo-ctx.start, hi-ctx.start, row[lo-a:hi-a] if torch.is_tensor(row) else row)
+
+        v_local, a_local = dit.final_layer(h, t_emb, local_seg(video_seg), local_seg(audio_seg),
+                                          sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a))
 
         v = _gather_rows(v_local, counts_for(video_seg), ctx, dit.final_layer.video_out.out_features, device)
         a = _gather_rows(a_local, counts_for(audio_seg), ctx, dit.final_layer.audio_out.out_features, device)
@@ -558,5 +584,4 @@ def sp_forward(dit, x, timestep, context, transformer_options, minimax_payload, 
     video_out = unpatchify_video(v, latent_t, lat_h // 2, lat_w // 2, dit.latents_dim, dit.patch_size)
     video_out = video_out[:, :, :orig_t, :orig_h, :orig_w]
     audio_out = unpack_audio(a)
-    slope_a = time_shift_slope(sigma_v, shift_v, shift_a).to(audio_out.dtype)
-    return [-video_out.to(video_x.dtype), (-slope_a) * audio_out.to(audio_x.dtype)]
+    return [-video_out.to(video_x.dtype), -audio_out.to(audio_x.dtype)]

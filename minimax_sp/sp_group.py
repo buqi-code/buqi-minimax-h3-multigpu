@@ -11,6 +11,7 @@ class of bugs.
 """
 
 import atexit
+import json
 import logging
 import os
 import subprocess
@@ -23,12 +24,15 @@ import torch
 import torch.distributed as dist
 
 import comfy.model_management
+from comfy.cli_args import args as comfy_args
+import folder_paths
 
 from . import sp_forward as spf
 from . import sp_vae as spv
+from . import sp_patches as patch_sync
 
 REF_META_KEYS = ("kind", "latent_h", "latent_w", "latent_t", "ref_audio_t")
-TO_WORKER_OPTIONS = ("minimax_h3_sigma_shift_video", "minimax_h3_sigma_shift_audio")
+TO_WORKER_OPTIONS = ("minimax_h3_sigma_shift_video", "minimax_h3_sigma_shift_audio", "prefetch_dynamic_vbars")
 
 _GROUPS = {}
 
@@ -68,11 +72,16 @@ def build_meta(x, timestep, context, transformer_options, payload):
         "visual_cond_noise_aug": payload.get("visual_cond_noise_aug", spf.VISUAL_COND_TIMESTEP),
         "audio_cond_noise_aug": payload.get("audio_cond_noise_aug", spf.AUDIO_COND_TIMESTEP),
         "options": {k: transformer_options[k] for k in TO_WORKER_OPTIONS if k in transformer_options},
+        "layout": payload.get("layout") or spf.PackedLayout(
+            context.shape[1], x[0].shape[2], (x[0].shape[3]+1)//2*2,
+            (x[0].shape[4]+1)//2*2, x[1].shape[-1],
+            keyframes=payload.get("keyframes"), refs=payload.get("refs")),
     }
 
 
 def payload_from_meta(meta, tensors):
     p = {
+        "layout": meta["layout"],
         "seed": meta["seed"],
         "visual_cond_noise_aug": meta["visual_cond_noise_aug"],
         "audio_cond_noise_aug": meta["audio_cond_noise_aug"],
@@ -102,13 +111,23 @@ def ordered_tensors(x, timestep, context, payload):
 
 class SPGroup:
     def __init__(self, world, unet_name, weight_dtype, devices, port=29511):
+        if dist.is_initialized():
+            raise RuntimeError("MiniMax SP cannot adopt an existing process group; use a separate ComfyUI process")
         self.world = world
         self.unet_name = unet_name
         self.procs = []
         self.log_paths = {}
         self.n_forward = 0
         self.vae_sent = False
-        comfy_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.patch_uuid = None
+        self.patches_ready = False
+        self.verify_pending = False
+        comfy_root = os.path.dirname(os.path.abspath(folder_paths.__file__))
+        runtime = {k: getattr(comfy_args, k) for k in (
+            "force_fp16", "fp16_unet", "fp32_unet", "bf16_unet", "disable_dynamic_vram",
+            "disable_comfy_compiler", "disable_cuda_graphs", "use_pytorch_cross_attention",
+            "disable_triton_backend", "highvram", "lowvram", "reserve_vram",
+            "vram_headroom", "disable_nvml_pressure")}
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp_worker.py")
         log_dir = os.environ.get("MINIMAX_SP_LOGDIR") or tempfile.gettempdir()
         for r in range(1, world):
@@ -120,9 +139,11 @@ class SPGroup:
             log = open(log_path, "w")
             self.procs.append(subprocess.Popen(
                 [sys.executable, script, "--rank", str(r), "--world", str(world),
-                 "--port", str(port), "--unet", unet_name, "--weight-dtype", weight_dtype,
-                 "--comfy-root", comfy_root],
+                 "--port", str(port), "--unet", folder_paths.get_full_path_or_raise("diffusion_models", unet_name),
+                 "--weight-dtype", weight_dtype, "--comfy-root", comfy_root,
+                 "--runtime-options", json.dumps(runtime)],
                 env=env, stdout=log, stderr=log, cwd=comfy_root))
+            log.close()
             logging.info(f"[minimax_sp] spawned worker rank {r} on physical GPU {devices[r]}")
 
         if not dist.is_initialized():
@@ -138,26 +159,74 @@ class SPGroup:
     def check_alive(self):
         for r, p in enumerate(self.procs, start=1):
             if p.poll() is not None:
-                raise RuntimeError(f"[minimax_sp] worker rank {r} died (exit {p.returncode}), "
-                                   f"see {self.log_paths[r]}")
+                message = f"[minimax_sp] worker rank {r} died (exit {p.returncode}), see {self.log_paths[r]}"
+                self.destroy()
+                raise RuntimeError(message)
 
-    def forward(self, dit, x, timestep, context, transformer_options, payload):
+    def sync_patches(self, patcher):
+        self.patches_ready = False
         self.check_alive()
+        version = patch_sync.patch_version(patcher)
+        try:
+            dist.broadcast_object_list([{"op": "prepare", "memory_required": patch_sync.memory_budget(patcher),
+                                         "version": version}], src=0, group=self.obj_pg)
+            ready = [None] * self.world
+            dist.all_gather_object(ready, {"ready": True}, group=self.obj_pg)
+            if any(reply != {"ready": True} for reply in ready):
+                raise RuntimeError(f"MiniMax SP worker preparation failed: {ready}")
+            if version != self.patch_uuid:
+                with patch_sync.export_patches(patcher) as manifest:
+                    dist.broadcast_object_list([manifest.message()], src=0, group=self.obj_pg)
+                    replies = [None] * self.world
+                    dist.all_gather_object(replies, manifest.ready(0), group=self.obj_pg)
+                    patch_sync.validate_replies(manifest, replies, self.world)
+                self.patch_uuid = version
+                self.verify_pending = os.environ.get("MINIMAX_SP_VERIFY") == "1"
+                logging.info("[minimax_sp] all ranks acknowledged %d patched keys, sha256=%s",
+                             len(manifest.keys), manifest.sha256)
+            self.patches_ready = True
+        except Exception:
+            self.destroy()
+            raise
+
+    def forward(self, dit, x, timestep, context, transformer_options, payload,
+                denoise_mask=None, audio_denoise_mask=None):
+        self.check_alive()
+        if not self.patches_ready:
+            raise RuntimeError("MiniMax SP denoise prohibited: patches have not been acknowledged")
+        if transformer_options.get("patches_replace") or transformer_options.get("patches"):
+            raise RuntimeError("[minimax_sp] attention/block patches require SP-aware handling")
         profile = os.environ.get("MINIMAX_SP_PROFILE")
         try:
             t_disp = time.perf_counter()
             meta = build_meta(x, timestep, context, transformer_options, payload)
+            meta["denoise_mask"] = tensor_meta(denoise_mask)
+            meta["audio_denoise_mask"] = tensor_meta(audio_denoise_mask)
+            if transformer_options.get("sample_sigmas") is not None:
+                meta["options"]["sample_sigmas"] = transformer_options["sample_sigmas"].cpu()
             dist.broadcast_object_list([meta], src=0, group=self.obj_pg)
             t_meta = time.perf_counter()
             device = x[0].device
-            for t in ordered_tensors(x, timestep, context, payload):
+            for t in [*ordered_tensors(x, timestep, context, payload), denoise_mask, audio_denoise_mask]:
                 if t is not None:
                     dist.broadcast(t.to(device).contiguous(), src=0)
             if profile:
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
             out = spf.sp_forward(dit, x, timestep, context, transformer_options, payload,
-                                 0, self.world, None)
+                                 0, self.world, None, denoise_mask, audio_denoise_mask)
+            if self.verify_pending:
+                # Verification only: compare the actual loaded ranks to native H3 before accepting a step.
+                reference = type(dit)._forward(dit, x, timestep, context, transformer_options.copy(),
+                                                minimax_payload=payload, denoise_mask=denoise_mask,
+                                                audio_denoise_mask=audio_denoise_mask)
+                for label, actual, expected in zip(("video", "audio"), out, reference):
+                    delta = (actual.float() - expected.float()).abs().max().item()
+                    relative = delta / max(expected.float().abs().max().item(), 1e-12)
+                    logging.info("[minimax_sp][verify] %s max_abs=%.8g relative=%.8g", label, delta, relative)
+                    if not torch.isfinite(actual).all() or not torch.isfinite(expected).all() or relative > 1e-3:
+                        raise RuntimeError(f"[minimax_sp] {label} differs from native H3: relative={relative}")
+                self.verify_pending = False
             if profile:
                 torch.cuda.synchronize()
                 logging.info(f"[minimax_sp][profile] step {self.n_forward}: "
@@ -259,7 +328,7 @@ class SPGroup:
                     return got
                 logging.warning(f"[minimax_sp] vae chunk {i} did not match the plan, "
                                 "decoding it locally")
-                return fsm._adaptive_decode(clip_z)
+                return original(clip_z)
 
             original = fsm._adaptive_decode
             fsm._adaptive_decode = serve
@@ -287,6 +356,14 @@ class SPGroup:
             raise
 
     def destroy(self):
+        # Do not broadcast shutdown into a failed collective.
+        for process in self.procs:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        self.procs = []
+        if dist.is_initialized():
+            dist.destroy_process_group()
         self.shutdown()
         for key, group in list(_GROUPS.items()):
             if group is self:
