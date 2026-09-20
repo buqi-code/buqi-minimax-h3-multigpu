@@ -185,7 +185,7 @@ class SPGroup:
                 logging.info("[minimax_sp] all ranks acknowledged %d patched keys, sha256=%s",
                              len(manifest.keys), manifest.sha256)
             self.patches_ready = True
-        except Exception:
+        except (Exception, comfy.model_management.InterruptProcessingException):
             self.destroy()
             raise
 
@@ -235,7 +235,7 @@ class SPGroup:
                              f"sp_forward={1000 * (time.perf_counter() - t0):.1f}ms")
                 self.n_forward += 1
             return out
-        except Exception:
+        except (Exception, comfy.model_management.InterruptProcessingException):
             # ranks are desynchronized past this point; drop the group so the next
             # prompt respawns a clean one instead of hanging on a collective
             logging.exception("[minimax_sp] forward failed, tearing down the group")
@@ -350,7 +350,7 @@ class SPGroup:
                              f"exact={torch.equal(out, ref_out)} max_abs={d.max().item():.3e} "
                              f"differing={int((d > 0).sum())}/{d.numel()}")
             return out
-        except Exception:
+        except (Exception, comfy.model_management.InterruptProcessingException):
             logging.exception("[minimax_sp] sharded vae decode failed, tearing down the group")
             self.destroy()
             raise
