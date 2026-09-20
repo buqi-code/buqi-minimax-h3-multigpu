@@ -134,6 +134,44 @@ class PatchSyncTests(unittest.TestCase):
                 group.forward(None, [torch.zeros(1)], None, None, {}, None)
         group.destroy.assert_called_once()
 
+    def test_failed_start_cleans_worker_store_and_group(self):
+        from minimax_sp import sp_group
+        worker = Mock()
+        worker.poll.return_value = None
+        captured = []
+
+        def fail_start(group, *args):
+            captured.append(group)
+            group.procs = [worker]
+            group.obj_pg, group.store = object(), object()
+            raise RuntimeError("subgroup creation failed")
+
+        with patch.object(SPGroup, "_start", fail_start), \
+                patch.object(sp_group.dist, "is_initialized", side_effect=[False, True]), \
+                patch.object(sp_group.dist, "destroy_process_group") as cleanup:
+            with self.assertRaisesRegex(RuntimeError, "subgroup creation failed"):
+                SPGroup(2, "model", "default", ["0", "1"])
+        cleanup.assert_called_once()
+        worker.kill.assert_called_once()
+        worker.wait.assert_called_once()
+        self.assertIsNone(captured[0].obj_pg)
+        self.assertIsNone(captured[0].store)
+        self.assertFalse(captured[0].patches_ready)
+
+    def test_destroy_removes_cached_group_and_is_idempotent(self):
+        from minimax_sp import sp_group
+        group = SPGroup.__new__(SPGroup)
+        group.procs, group.obj_pg, group.store = [], object(), object()
+        with patch.dict(sp_group._GROUPS, {"test": group}, clear=True), \
+                patch.object(sp_group.dist, "is_initialized", side_effect=[True, False]), \
+                patch.object(sp_group.dist, "destroy_process_group") as cleanup:
+            group.destroy()
+            group.destroy()
+            self.assertFalse(sp_group._GROUPS)
+        cleanup.assert_called_once()
+        self.assertIsNone(group.store)
+        self.assertIsNone(group.obj_pg)
+
 
 if __name__ == "__main__":
     unittest.main()

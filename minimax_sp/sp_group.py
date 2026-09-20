@@ -110,7 +110,7 @@ def ordered_tensors(x, timestep, context, payload):
 
 
 class SPGroup:
-    def __init__(self, world, unet_name, weight_dtype, devices, port=29511):
+    def __init__(self, world, unet_name, weight_dtype, devices, port=0):
         if dist.is_initialized():
             raise RuntimeError("MiniMax SP cannot adopt an existing process group; use a separate ComfyUI process")
         self.world = world
@@ -122,6 +122,20 @@ class SPGroup:
         self.patch_uuid = None
         self.patches_ready = False
         self.verify_pending = False
+        self.obj_pg = None
+        self.store = None
+        try:
+            self._start(world, unet_name, weight_dtype, devices, port)
+        except (Exception, comfy.model_management.InterruptProcessingException):
+            self.destroy()
+            raise
+
+    def _start(self, world, unet_name, weight_dtype, devices, port):
+        # A fresh store avoids reusing stale rendezvous keys after cancellation.
+        # Bind port 0 before spawning, rather than probing/releasing a free port.
+        self.store = dist.TCPStore("127.0.0.1", port, world, True,
+                                   timeout=timedelta(minutes=40), wait_for_workers=False)
+        port = self.store.port
         comfy_root = os.path.dirname(os.path.abspath(folder_paths.__file__))
         runtime = {k: getattr(comfy_args, k) for k in (
             "force_fp16", "fp16_unet", "fp32_unet", "bf16_unet", "disable_dynamic_vram",
@@ -136,20 +150,18 @@ class SPGroup:
             env["PYTHONPATH"] = comfy_root + os.pathsep + env.get("PYTHONPATH", "")
             log_path = os.path.join(log_dir, f"minimax_sp_worker{r}.log")
             self.log_paths[r] = log_path
-            log = open(log_path, "w")
-            self.procs.append(subprocess.Popen(
-                [sys.executable, script, "--rank", str(r), "--world", str(world),
-                 "--port", str(port), "--unet", folder_paths.get_full_path_or_raise("diffusion_models", unet_name),
-                 "--weight-dtype", weight_dtype, "--comfy-root", comfy_root,
-                 "--runtime-options", json.dumps(runtime)],
-                env=env, stdout=log, stderr=log, cwd=comfy_root))
-            log.close()
+            with open(log_path, "w") as log:
+                self.procs.append(subprocess.Popen(
+                    [sys.executable, script, "--rank", str(r), "--world", str(world),
+                     "--port", str(port), "--unet", folder_paths.get_full_path_or_raise("diffusion_models", unet_name),
+                     "--weight-dtype", weight_dtype, "--comfy-root", comfy_root,
+                     "--runtime-options", json.dumps(runtime)],
+                    env=env, stdout=log, stderr=log, cwd=comfy_root))
             logging.info(f"[minimax_sp] spawned worker rank {r} on physical GPU {devices[r]}")
 
-        if not dist.is_initialized():
-            dist.init_process_group("nccl", init_method=f"tcp://127.0.0.1:{port}",
-                                    rank=0, world_size=world, timeout=timedelta(minutes=40),
-                                    device_id=torch.device("cuda", 0))
+        dist.init_process_group("nccl", store=self.store,
+                                rank=0, world_size=world, timeout=timedelta(minutes=40),
+                                device_id=torch.device("cuda", 0))
         self.obj_pg = dist.new_group(backend="gloo", timeout=timedelta(minutes=40))
         logging.info("[minimax_sp] process group up, waiting for workers to load weights...")
         dist.barrier()
@@ -357,17 +369,23 @@ class SPGroup:
 
     def destroy(self):
         # Do not broadcast shutdown into a failed collective.
+        self.patches_ready = False
+        atexit.unregister(self.shutdown)
         for process in self.procs:
             if process.poll() is None:
                 process.kill()
             process.wait()
         self.procs = []
-        if dist.is_initialized():
-            dist.destroy_process_group()
-        self.shutdown()
-        for key, group in list(_GROUPS.items()):
-            if group is self:
-                del _GROUPS[key]
+        try:
+            if dist.is_initialized():
+                dist.destroy_process_group()
+        finally:
+            # Python references can keep Gloo and its rendezvous store alive.
+            self.obj_pg = None
+            self.store = None
+            for key, group in list(_GROUPS.items()):
+                if group is self:
+                    del _GROUPS[key]
 
     def shutdown(self):
         if not self.procs:
@@ -381,11 +399,7 @@ class SPGroup:
                 p.wait(timeout=15)
             except Exception:
                 p.kill()
-        self.procs = []
-        try:
-            dist.destroy_process_group()
-        except Exception:
-            pass
+        self.destroy()
 
 
 def active_group():
