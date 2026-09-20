@@ -1,0 +1,1254 @@
+{
+  "schema_version": 1,
+  "upstream": "buqi-code/buqi-minimax-h3-multigpu@bce083929c135bdabd41679da3ddf6f409336ed3",
+  "comfyui": "99073836d45f66053c45ba8564984e6def9cebba",
+  "hardware": "2 x RTX 2080 Ti 22528 MiB, SM75, NV2",
+  "unit_tests": {
+    "api": {
+      "passed": true,
+      "tests": 6
+    },
+    "patch_sync": {
+      "passed": true,
+      "tests": 11
+    },
+    "algorithm_preservation": {
+      "passed": true,
+      "tests": 1
+    },
+    "benchmark": {
+      "passed": true,
+      "tests": 5
+    },
+    "tiny_two_rank_parity": {
+      "passed_stream_comparisons": 10
+    }
+  },
+  "note": "pr_* runs are correctness regressions with verification overhead, not speedup benchmarks. Historical baseline is explicitly separate. Expected interrupt/dead-worker runs are not successful generations.",
+  "patch_ack_sequence": [
+    {
+      "keys": 0,
+      "sha256": "c087a98d6a5c8fbe615d5eebab62877bd63d6e41c08b4491d6e62ebbb60252c8"
+    },
+    {
+      "keys": 208,
+      "sha256": "7013b90e013d7f9c508a4cdd18b2a80b81713242bb2fab2c7b5bf48fb7976565"
+    },
+    {
+      "keys": 208,
+      "sha256": "2c49cd7988078327483f9ea8f366e2989497e2ec57c507a278be34c1050f197d"
+    },
+    {
+      "keys": 0,
+      "sha256": "c087a98d6a5c8fbe615d5eebab62877bd63d6e41c08b4491d6e62ebbb60252c8"
+    },
+    {
+      "keys": 0,
+      "sha256": "c087a98d6a5c8fbe615d5eebab62877bd63d6e41c08b4491d6e62ebbb60252c8"
+    },
+    {
+      "keys": 0,
+      "sha256": "c087a98d6a5c8fbe615d5eebab62877bd63d6e41c08b4491d6e62ebbb60252c8"
+    },
+    {
+      "keys": 0,
+      "sha256": "c087a98d6a5c8fbe615d5eebab62877bd63d6e41c08b4491d6e62ebbb60252c8"
+    },
+    {
+      "keys": 0,
+      "sha256": "c087a98d6a5c8fbe615d5eebab62877bd63d6e41c08b4491d6e62ebbb60252c8"
+    },
+    {
+      "keys": 0,
+      "sha256": "c087a98d6a5c8fbe615d5eebab62877bd63d6e41c08b4491d6e62ebbb60252c8"
+    },
+    {
+      "keys": 208,
+      "sha256": "8e2a364eda45182630fb69f01e4c6431ca0c83d6979474fb61f67da0bfe65fa6"
+    },
+    {
+      "keys": 208,
+      "sha256": "0c8dc08cbf39ffc1319281d7e93a51d5f976f5d0bc108d2d78b3d953e7a7f3c9"
+    },
+    {
+      "keys": 0,
+      "sha256": "c087a98d6a5c8fbe615d5eebab62877bd63d6e41c08b4491d6e62ebbb60252c8"
+    }
+  ],
+  "native_parity_sequence": [
+    {
+      "stream": "video",
+      "max_abs": 3.8146973e-06,
+      "relative": 3.6239631e-07
+    },
+    {
+      "stream": "audio",
+      "max_abs": 0.0,
+      "relative": 0.0
+    },
+    {
+      "stream": "video",
+      "max_abs": 8.1062317e-06,
+      "relative": 1.0091495e-06
+    },
+    {
+      "stream": "audio",
+      "max_abs": 0.0,
+      "relative": 0.0
+    },
+    {
+      "stream": "video",
+      "max_abs": 1.1444092e-05,
+      "relative": 1.582497e-06
+    },
+    {
+      "stream": "audio",
+      "max_abs": 0.0,
+      "relative": 0.0
+    },
+    {
+      "stream": "video",
+      "max_abs": 1.4305115e-06,
+      "relative": 2.2400828e-07
+    },
+    {
+      "stream": "audio",
+      "max_abs": 0.0,
+      "relative": 0.0
+    },
+    {
+      "stream": "video",
+      "max_abs": 3.8146973e-06,
+      "relative": 3.6239631e-07
+    },
+    {
+      "stream": "audio",
+      "max_abs": 0.0,
+      "relative": 0.0
+    },
+    {
+      "stream": "video",
+      "max_abs": 3.8146973e-06,
+      "relative": 3.6239631e-07
+    },
+    {
+      "stream": "audio",
+      "max_abs": 0.0,
+      "relative": 0.0
+    },
+    {
+      "stream": "video",
+      "max_abs": 2.3841858e-06,
+      "relative": 2.2520064e-07
+    },
+    {
+      "stream": "audio",
+      "max_abs": 0.0,
+      "relative": 0.0
+    },
+    {
+      "stream": "video",
+      "max_abs": 2.3841858e-06,
+      "relative": 2.2520064e-07
+    },
+    {
+      "stream": "audio",
+      "max_abs": 0.0,
+      "relative": 0.0
+    },
+    {
+      "stream": "video",
+      "max_abs": 2.8610229e-06,
+      "relative": 2.8691172e-07
+    },
+    {
+      "stream": "audio",
+      "max_abs": 0.0,
+      "relative": 0.0
+    },
+    {
+      "stream": "video",
+      "max_abs": 1.6689301e-06,
+      "relative": 2.4610824e-07
+    },
+    {
+      "stream": "audio",
+      "max_abs": 0.0,
+      "relative": 0.0
+    },
+    {
+      "stream": "video",
+      "max_abs": 1.4305115e-06,
+      "relative": 2.3138339e-07
+    },
+    {
+      "stream": "audio",
+      "max_abs": 0.0,
+      "relative": 0.0
+    },
+    {
+      "stream": "video",
+      "max_abs": 1.4305115e-06,
+      "relative": 2.2400828e-07
+    },
+    {
+      "stream": "audio",
+      "max_abs": 0.0,
+      "relative": 0.0
+    }
+  ],
+  "runtime_recovery": [
+    {
+      "run": "pr_final_interrupt",
+      "terminal": "execution_interrupted",
+      "seconds": 2.812059858999419
+    },
+    {
+      "run": "pr_final_after_interrupt",
+      "terminal": "execution_success",
+      "seconds": 16.335645855999246
+    },
+    {
+      "run": "pr_final_dead_worker",
+      "terminal": "execution_error",
+      "seconds": 0.21197837399995478
+    },
+    {
+      "run": "pr_final_after_worker_restart",
+      "terminal": "execution_success",
+      "seconds": 17.156202250000206
+    }
+  ],
+  "initial_cancellation_failure": {
+    "source_commit": "e5f08a124af6b6a01af4ebc8028cd209f6c32c26",
+    "cancelled_run": "pr_interrupt",
+    "hung_next_run": "pr_after_interrupt",
+    "result": "failed",
+    "cause": "ComfyUI InterruptProcessingException derives from BaseException, bypassing SPGroup except Exception cleanup and leaving a worker collective outstanding.",
+    "diagnostics": "Runtime logs plus current ComfyUI exception declaration; gdb attach denied and sudo requires password. No ptrace policy changes made.",
+    "cleanup": "Only test server PID 54330 and its worker PID 55208 were terminated; logs retained."
+  },
+  "runs": [
+    {
+      "run": "baseline_w1_480p",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        832,
+        480
+      ],
+      "frames": 124,
+      "steps": 20,
+      "seed": 42424242,
+      "world_size": 1,
+      "source_commit": null,
+      "source_files_sha256": null,
+      "lora": null,
+      "runtime_seconds": 935.2784538020005,
+      "steady_step_seconds": 44.19555390663156,
+      "VRAM": {
+        "0": {
+          "peak_mib": 20561,
+          "max_util_percent": 100
+        },
+        "1": {
+          "peak_mib": 19,
+          "max_util_percent": 0
+        }
+      },
+      "speedup": null,
+      "evidence": "historical_local_compatibility_run",
+      "decoded_media": {
+        "frames": 124,
+        "shape": [
+          480,
+          832,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 49.463731782936634,
+        "audio_finite": true,
+        "audio_peak": 0.0521785207092762,
+        "audio_rms": 0.008200610383354592
+      }
+    },
+    {
+      "run": "baseline_w2_480p",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        832,
+        480
+      ],
+      "frames": 124,
+      "steps": 20,
+      "seed": 42424242,
+      "world_size": 2,
+      "source_commit": null,
+      "source_files_sha256": null,
+      "lora": null,
+      "runtime_seconds": 534.3042832440005,
+      "steady_step_seconds": 23.738045975000013,
+      "VRAM": {
+        "0": {
+          "peak_mib": 20673,
+          "max_util_percent": 100
+        },
+        "1": {
+          "peak_mib": 20261,
+          "max_util_percent": 100
+        }
+      },
+      "speedup": {
+        "baseline": "baseline_w1_480p",
+        "total": 1.750460333433051,
+        "steady_step": 1.8618025238124738,
+        "conditions_source": "REPORT.md (legacy, warmed pair)"
+      },
+      "evidence": "historical_local_compatibility_run",
+      "decoded_media": {
+        "frames": 124,
+        "shape": [
+          480,
+          832,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 49.58042936985221,
+        "audio_finite": true,
+        "audio_peak": 0.039822906255722046,
+        "audio_rms": 0.007556042627147064
+      }
+    },
+    {
+      "run": "pr_after_interrupt",
+      "status": "failed_or_incomplete",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424344,
+      "world_size": 2,
+      "source_commit": "e5f08a124af6b6a01af4ebc8028cd209f6c32c26",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "c5fd29ac204eababfc390a4f77fb112f493ef8b6517ab2cd0d48eec883186f81",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4272e430d15e144531b03472579aee6a95dad3bd6f5288627a32de7fea01dfe0"
+      },
+      "lora": null,
+      "runtime_seconds": null,
+      "steady_step_seconds": null,
+      "VRAM": {},
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": null
+    },
+    {
+      "run": "pr_base_repeat",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424243,
+      "world_size": 2,
+      "source_commit": "e5f08a124af6b6a01af4ebc8028cd209f6c32c26",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "c5fd29ac204eababfc390a4f77fb112f493ef8b6517ab2cd0d48eec883186f81",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4272e430d15e144531b03472579aee6a95dad3bd6f5288627a32de7fea01dfe0"
+      },
+      "lora": null,
+      "runtime_seconds": 15.603283056001601,
+      "steady_step_seconds": 0.40865972400024475,
+      "VRAM": {
+        "0": {
+          "peak_mib": 21735,
+          "max_util_percent": 100
+        },
+        "1": {
+          "peak_mib": 19627,
+          "max_util_percent": 100
+        }
+      },
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 22,
+        "shape": [
+          192,
+          320,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 60.28736351305484,
+        "audio_finite": true,
+        "audio_peak": 0.7543884515762329,
+        "audio_rms": 0.08953351962373264
+      }
+    },
+    {
+      "run": "pr_base_smoke",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424242,
+      "world_size": 2,
+      "source_commit": "e5f08a124af6b6a01af4ebc8028cd209f6c32c26",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "c5fd29ac204eababfc390a4f77fb112f493ef8b6517ab2cd0d48eec883186f81",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4272e430d15e144531b03472579aee6a95dad3bd6f5288627a32de7fea01dfe0"
+      },
+      "lora": null,
+      "runtime_seconds": 20.23481435499889,
+      "steady_step_seconds": 0.4275671396668865,
+      "VRAM": {
+        "0": {
+          "peak_mib": 21713,
+          "max_util_percent": 97
+        },
+        "1": {
+          "peak_mib": 19505,
+          "max_util_percent": 98
+        }
+      },
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 22,
+        "shape": [
+          192,
+          320,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 71.9433500145507,
+        "audio_finite": true,
+        "audio_peak": 0.021978894248604774,
+        "audio_rms": 0.004541242701292698
+      }
+    },
+    {
+      "run": "pr_clear_i2v",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424242,
+      "world_size": 2,
+      "source_commit": "e5f08a124af6b6a01af4ebc8028cd209f6c32c26",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "c5fd29ac204eababfc390a4f77fb112f493ef8b6517ab2cd0d48eec883186f81",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4272e430d15e144531b03472579aee6a95dad3bd6f5288627a32de7fea01dfe0"
+      },
+      "lora": null,
+      "runtime_seconds": 23.30807285800074,
+      "steady_step_seconds": 0.45827848233299545,
+      "VRAM": {
+        "0": {
+          "peak_mib": 21703,
+          "max_util_percent": 98
+        },
+        "1": {
+          "peak_mib": 19627,
+          "max_util_percent": 93
+        }
+      },
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 22,
+        "shape": [
+          192,
+          320,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 47.54245837925516,
+        "audio_finite": true,
+        "audio_peak": 0.008913355879485607,
+        "audio_rms": 0.0013596675557378862
+      }
+    },
+    {
+      "run": "pr_final_after_interrupt",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424344,
+      "world_size": 2,
+      "source_commit": "9bfaf92c8a4995a6149d9fb966f45a3e772dc45e",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "6366add5a642153970174d9ca0e726d5c4071e5b11814716b5c762fe694ca101",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4d126dead2d824f595d7dbcf3f345c911398739f381a51731628b9d3ce25d671"
+      },
+      "lora": null,
+      "runtime_seconds": 16.005717656998968,
+      "steady_step_seconds": 0.4227157376669008,
+      "VRAM": {},
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 22,
+        "shape": [
+          192,
+          320,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 67.63715239606437,
+        "audio_finite": true,
+        "audio_peak": 0.014216113835573196,
+        "audio_rms": 0.001969245431597223
+      }
+    },
+    {
+      "run": "pr_final_after_worker_restart",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424346,
+      "world_size": 2,
+      "source_commit": "9bfaf92c8a4995a6149d9fb966f45a3e772dc45e",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "6366add5a642153970174d9ca0e726d5c4071e5b11814716b5c762fe694ca101",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4d126dead2d824f595d7dbcf3f345c911398739f381a51731628b9d3ce25d671"
+      },
+      "lora": null,
+      "runtime_seconds": 16.82664058299997,
+      "steady_step_seconds": 0.3938293779998882,
+      "VRAM": {},
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 22,
+        "shape": [
+          192,
+          320,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 60.176023498256995,
+        "audio_finite": true,
+        "audio_peak": 0.028076503425836563,
+        "audio_rms": 0.0061296111171982495
+      }
+    },
+    {
+      "run": "pr_final_clear_i2v",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424242,
+      "world_size": 2,
+      "source_commit": "9bfaf92c8a4995a6149d9fb966f45a3e772dc45e",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "6366add5a642153970174d9ca0e726d5c4071e5b11814716b5c762fe694ca101",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4d126dead2d824f595d7dbcf3f345c911398739f381a51731628b9d3ce25d671"
+      },
+      "lora": null,
+      "runtime_seconds": 21.783918408000318,
+      "steady_step_seconds": 0.45831634700031526,
+      "VRAM": {
+        "0": {
+          "peak_mib": 21723,
+          "max_util_percent": 97
+        },
+        "1": {
+          "peak_mib": 19963,
+          "max_util_percent": 98
+        }
+      },
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 22,
+        "shape": [
+          192,
+          320,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 47.54245837925516,
+        "audio_finite": true,
+        "audio_peak": 0.008913355879485607,
+        "audio_rms": 0.0013596675557378862
+      }
+    },
+    {
+      "run": "pr_final_dead_worker",
+      "status": "failed_or_incomplete",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424345,
+      "world_size": 2,
+      "source_commit": "9bfaf92c8a4995a6149d9fb966f45a3e772dc45e",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "6366add5a642153970174d9ca0e726d5c4071e5b11814716b5c762fe694ca101",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4d126dead2d824f595d7dbcf3f345c911398739f381a51731628b9d3ce25d671"
+      },
+      "lora": null,
+      "runtime_seconds": null,
+      "steady_step_seconds": null,
+      "VRAM": {},
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": null
+    },
+    {
+      "run": "pr_final_interrupt",
+      "status": "failed_or_incomplete",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 20,
+      "seed": 42424343,
+      "world_size": 2,
+      "source_commit": "9bfaf92c8a4995a6149d9fb966f45a3e772dc45e",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "6366add5a642153970174d9ca0e726d5c4071e5b11814716b5c762fe694ca101",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4d126dead2d824f595d7dbcf3f345c911398739f381a51731628b9d3ce25d671"
+      },
+      "lora": null,
+      "runtime_seconds": null,
+      "steady_step_seconds": null,
+      "VRAM": {},
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": null
+    },
+    {
+      "run": "pr_final_turbo4",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424242,
+      "world_size": 2,
+      "source_commit": "9bfaf92c8a4995a6149d9fb966f45a3e772dc45e",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "6366add5a642153970174d9ca0e726d5c4071e5b11814716b5c762fe694ca101",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4d126dead2d824f595d7dbcf3f345c911398739f381a51731628b9d3ce25d671"
+      },
+      "lora": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+      "runtime_seconds": 28.590159207000397,
+      "steady_step_seconds": 1.2232996833336074,
+      "VRAM": {
+        "0": {
+          "peak_mib": 21847,
+          "max_util_percent": 100
+        },
+        "1": {
+          "peak_mib": 20083,
+          "max_util_percent": 99
+        }
+      },
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 22,
+        "shape": [
+          192,
+          320,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 72.48009870611448,
+        "audio_finite": true,
+        "audio_peak": 0.027218997478485107,
+        "audio_rms": 0.0026953414477486537
+      }
+    },
+    {
+      "run": "pr_final_turbo8",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 8,
+      "seed": 42424242,
+      "world_size": 2,
+      "source_commit": "9bfaf92c8a4995a6149d9fb966f45a3e772dc45e",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "6366add5a642153970174d9ca0e726d5c4071e5b11814716b5c762fe694ca101",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4d126dead2d824f595d7dbcf3f345c911398739f381a51731628b9d3ce25d671"
+      },
+      "lora": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "runtime_seconds": 33.44229008900038,
+      "steady_step_seconds": 1.196127360857125,
+      "VRAM": {
+        "0": {
+          "peak_mib": 21591,
+          "max_util_percent": 100
+        },
+        "1": {
+          "peak_mib": 20407,
+          "max_util_percent": 100
+        }
+      },
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 22,
+        "shape": [
+          192,
+          320,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 75.63418396178376,
+        "audio_finite": true,
+        "audio_peak": 0.11399772763252258,
+        "audio_rms": 0.00585963266115675
+      }
+    },
+    {
+      "run": "pr_fixed_after_interrupt",
+      "status": "failed_or_incomplete",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424344,
+      "world_size": 2,
+      "source_commit": "cbb34bec9d0fe491de494e73e4bc19071c37bef9",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "357c07e415bdd849f829e70fa447d518e29a73d5a3f8c173493294520ff71bc1",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4272e430d15e144531b03472579aee6a95dad3bd6f5288627a32de7fea01dfe0"
+      },
+      "lora": null,
+      "runtime_seconds": null,
+      "steady_step_seconds": null,
+      "VRAM": {},
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": null
+    },
+    {
+      "run": "pr_fixed_base",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424242,
+      "world_size": 2,
+      "source_commit": "cbb34bec9d0fe491de494e73e4bc19071c37bef9",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "357c07e415bdd849f829e70fa447d518e29a73d5a3f8c173493294520ff71bc1",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4272e430d15e144531b03472579aee6a95dad3bd6f5288627a32de7fea01dfe0"
+      },
+      "lora": null,
+      "runtime_seconds": 27.12642715199945,
+      "steady_step_seconds": 0.3877857913333476,
+      "VRAM": {
+        "0": {
+          "peak_mib": 21707,
+          "max_util_percent": 98
+        },
+        "1": {
+          "peak_mib": 19505,
+          "max_util_percent": 96
+        }
+      },
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 22,
+        "shape": [
+          192,
+          320,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 71.9433500145507,
+        "audio_finite": true,
+        "audio_peak": 0.021978894248604774,
+        "audio_rms": 0.004541242701292698
+      }
+    },
+    {
+      "run": "pr_fixed_interrupt",
+      "status": "failed_or_incomplete",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 20,
+      "seed": 42424343,
+      "world_size": 2,
+      "source_commit": "cbb34bec9d0fe491de494e73e4bc19071c37bef9",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "357c07e415bdd849f829e70fa447d518e29a73d5a3f8c173493294520ff71bc1",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4272e430d15e144531b03472579aee6a95dad3bd6f5288627a32de7fea01dfe0"
+      },
+      "lora": null,
+      "runtime_seconds": null,
+      "steady_step_seconds": null,
+      "VRAM": {},
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": null
+    },
+    {
+      "run": "pr_interrupt",
+      "status": "failed_or_incomplete",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 20,
+      "seed": 42424343,
+      "world_size": 2,
+      "source_commit": "e5f08a124af6b6a01af4ebc8028cd209f6c32c26",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "c5fd29ac204eababfc390a4f77fb112f493ef8b6517ab2cd0d48eec883186f81",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4272e430d15e144531b03472579aee6a95dad3bd6f5288627a32de7fea01dfe0"
+      },
+      "lora": null,
+      "runtime_seconds": null,
+      "steady_step_seconds": null,
+      "VRAM": {},
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": null
+    },
+    {
+      "run": "pr_single_smoke",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424242,
+      "world_size": 1,
+      "source_commit": "e5f08a124af6b6a01af4ebc8028cd209f6c32c26",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "c5fd29ac204eababfc390a4f77fb112f493ef8b6517ab2cd0d48eec883186f81",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4272e430d15e144531b03472579aee6a95dad3bd6f5288627a32de7fea01dfe0"
+      },
+      "lora": null,
+      "runtime_seconds": 15.26355287899969,
+      "steady_step_seconds": 0.3409141160003249,
+      "VRAM": {
+        "0": {
+          "peak_mib": 21727,
+          "max_util_percent": 95
+        },
+        "1": {
+          "peak_mib": 175,
+          "max_util_percent": 1
+        }
+      },
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 22,
+        "shape": [
+          192,
+          320,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 71.53135934457215,
+        "audio_finite": true,
+        "audio_peak": 0.024447226896882057,
+        "audio_rms": 0.005019596372869479
+      }
+    },
+    {
+      "run": "pr_turbo4_480p",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        832,
+        480
+      ],
+      "frames": 124,
+      "steps": 4,
+      "seed": 42424242,
+      "world_size": 2,
+      "source_commit": "e5f08a124af6b6a01af4ebc8028cd209f6c32c26",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "c5fd29ac204eababfc390a4f77fb112f493ef8b6517ab2cd0d48eec883186f81",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4272e430d15e144531b03472579aee6a95dad3bd6f5288627a32de7fea01dfe0"
+      },
+      "lora": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+      "runtime_seconds": 186.36487301600027,
+      "steady_step_seconds": 23.707779091999935,
+      "VRAM": {
+        "0": {
+          "peak_mib": 21683,
+          "max_util_percent": 100
+        },
+        "1": {
+          "peak_mib": 21331,
+          "max_util_percent": 100
+        }
+      },
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 124,
+        "shape": [
+          480,
+          832,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 74.15878953874365,
+        "audio_finite": true,
+        "audio_peak": 0.15909656882286072,
+        "audio_rms": 0.023428154087159522
+      }
+    },
+    {
+      "run": "pr_turbo8_480p",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        832,
+        480
+      ],
+      "frames": 124,
+      "steps": 8,
+      "seed": 42424242,
+      "world_size": 2,
+      "source_commit": "e5f08a124af6b6a01af4ebc8028cd209f6c32c26",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "c5fd29ac204eababfc390a4f77fb112f493ef8b6517ab2cd0d48eec883186f81",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4272e430d15e144531b03472579aee6a95dad3bd6f5288627a32de7fea01dfe0"
+      },
+      "lora": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "runtime_seconds": 277.9043939260009,
+      "steady_step_seconds": 23.876702789285837,
+      "VRAM": {
+        "0": {
+          "peak_mib": 21341,
+          "max_util_percent": 100
+        },
+        "1": {
+          "peak_mib": 21387,
+          "max_util_percent": 100
+        }
+      },
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 124,
+        "shape": [
+          480,
+          832,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 63.963439819026746,
+        "audio_finite": true,
+        "audio_peak": 0.2940922975540161,
+        "audio_rms": 0.04653677628868028
+      }
+    },
+    {
+      "run": "pr_v3_base",
+      "status": "failed_or_incomplete",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424242,
+      "world_size": 2,
+      "source_commit": "d0533a5c511b5ffe13cafe0b14cb03bc3b747522",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "6366add5a642153970174d9ca0e726d5c4071e5b11814716b5c762fe694ca101",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4272e430d15e144531b03472579aee6a95dad3bd6f5288627a32de7fea01dfe0"
+      },
+      "lora": null,
+      "runtime_seconds": null,
+      "steady_step_seconds": null,
+      "VRAM": {
+        "0": {
+          "peak_mib": 14155,
+          "max_util_percent": 80
+        },
+        "1": {
+          "peak_mib": 175,
+          "max_util_percent": 1
+        }
+      },
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": null
+    },
+    {
+      "run": "pr_v4_after_interrupt",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424344,
+      "world_size": 2,
+      "source_commit": "9bfaf92c8a4995a6149d9fb966f45a3e772dc45e",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "6366add5a642153970174d9ca0e726d5c4071e5b11814716b5c762fe694ca101",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4d126dead2d824f595d7dbcf3f345c911398739f381a51731628b9d3ce25d671"
+      },
+      "lora": null,
+      "runtime_seconds": 16.182768886001213,
+      "steady_step_seconds": 0.44705874366688175,
+      "VRAM": {},
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 22,
+        "shape": [
+          192,
+          320,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 67.63715239606437,
+        "audio_finite": true,
+        "audio_peak": 0.014216113835573196,
+        "audio_rms": 0.001969245431597223
+      }
+    },
+    {
+      "run": "pr_v4_base",
+      "status": "success",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 4,
+      "seed": 42424242,
+      "world_size": 2,
+      "source_commit": "9bfaf92c8a4995a6149d9fb966f45a3e772dc45e",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "6366add5a642153970174d9ca0e726d5c4071e5b11814716b5c762fe694ca101",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4d126dead2d824f595d7dbcf3f345c911398739f381a51731628b9d3ce25d671"
+      },
+      "lora": null,
+      "runtime_seconds": 28.211312424000425,
+      "steady_step_seconds": 0.4554628696666138,
+      "VRAM": {
+        "0": {
+          "peak_mib": 21733,
+          "max_util_percent": 99
+        },
+        "1": {
+          "peak_mib": 19505,
+          "max_util_percent": 95
+        }
+      },
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": {
+        "frames": 22,
+        "shape": [
+          192,
+          320,
+          3
+        ],
+        "pixel_min": 0,
+        "pixel_max": 255,
+        "pixel_std": 71.9433500145507,
+        "audio_finite": true,
+        "audio_peak": 0.021978894248604774,
+        "audio_rms": 0.004541242701292698
+      }
+    },
+    {
+      "run": "pr_v4_interrupt",
+      "status": "failed_or_incomplete",
+      "model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "resolution": [
+        320,
+        192
+      ],
+      "frames": 22,
+      "steps": 20,
+      "seed": 42424343,
+      "world_size": 2,
+      "source_commit": "9bfaf92c8a4995a6149d9fb966f45a3e772dc45e",
+      "source_files_sha256": {
+        "minimax_sp/__init__.py": "af1052f172e87c6faa2f2e222d3e9bbe4406cda1626c14d065b01d6f12f2b6d5",
+        "minimax_sp/sp_forward.py": "22258c5d92de496a8b71ab5a49b57cafc3e9e2aafb79b39f60715e2d31f620c2",
+        "minimax_sp/sp_group.py": "6366add5a642153970174d9ca0e726d5c4071e5b11814716b5c762fe694ca101",
+        "minimax_sp/sp_patches.py": "a50e471422de08840b80d92d3ba2179e926b398d808a4517d4e0fef3f64cd0e0",
+        "minimax_sp/sp_vae.py": "0efe59f860bdd42b76a3c811b352a0b230aac29590acd43840a368631f6545ab",
+        "minimax_sp/sp_worker.py": "4d126dead2d824f595d7dbcf3f345c911398739f381a51731628b9d3ce25d671"
+      },
+      "lora": null,
+      "runtime_seconds": null,
+      "steady_step_seconds": null,
+      "VRAM": {},
+      "speedup": null,
+      "evidence": "recorded_run",
+      "decoded_media": null
+    }
+  ]
+}

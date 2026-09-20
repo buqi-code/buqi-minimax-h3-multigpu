@@ -1,2 +1,9 @@
 __pycache__/
 *.pyc
+
+# Raw machine-local runs and the historical audit stay local. Publish only the
+# reviewed, sanitized evidence/ summary; the archive branch preserves old docs.
+/results/
+/AUDIT.md
+/REPORT.md
+/CHANGES_LOCAL.md

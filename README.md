@@ -1,5 +1,11 @@
 # buqi-minimax-h3-multigpu
 
+> Compatibility branch: retains buqi-code's Ulysses algorithm and MIT attribution.
+> Tested locally with ComfyUI 0.36.0 (`99073836`), two SM75 GPUs, INT8 ConvRot H3
+> and native DynamicVRAM. See [INSTALL.md](INSTALL.md) and [CHANGELOG_LOCAL.md](CHANGELOG_LOCAL.md).
+> Performance tables below are the original author's measurements, not new claims
+> for every device or quantization format.
+
 **English** | [中文](README_zh.md) | [日本語](README_ja.md)
 
 Real multi-GPU inference for **MiniMax-H3** in ComfyUI — not just the denoise
@@ -41,8 +47,9 @@ Designed for the community's common setups first: **2 GPUs** (works from 1 to 8)
 ## Requirements
 
 - Linux (or WSL2 on Windows — NCCL is not available on native Windows)
-- ComfyUI **>= 0.30.0** (the release that ships `comfy.ldm.minimax.model`); the
-  loader refuses to import on older builds
+- This branch targets the current H3 API tested at ComfyUI **0.36.0 / 99073836**.
+  Known incompatible signatures fail; other revisions are explicitly unverified.
+  The original upstream branch targets 0.30.0.
 - MiniMax-H3 model files (DiT, Qwen3-VL text encoder, video/audio VAEs) installed
   as usual into `diffusion_models/`, `text_encoders/`, `vae/` — get them from the
   official MiniMax-H3 release; this repo contains code only
@@ -52,11 +59,15 @@ Designed for the community's common setups first: **2 GPUs** (works from 1 to 8)
 ## Install
 
 ```bash
-cd ComfyUI/custom_nodes
-git clone https://github.com/buqi-code/buqi-minimax-h3-multigpu.git
+# Keep the repository beside ComfyUI and install its node subpackage.
+# For this compatibility branch, use the published fork/branch named in INSTALL.md.
+ln -s /absolute/path/buqi-minimax-h3-multigpu/minimax_sp /absolute/path/ComfyUI/custom_nodes/minimax_sp
 ```
 
 No extra Python dependencies.
+
+Do not install the repository root as the node: it has no root `__init__.py`.
+Do not install a second copy alongside the linked subpackage.
 
 ## Quick start (2 GPUs)
 
