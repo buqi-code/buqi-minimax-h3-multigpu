@@ -1,8 +1,17 @@
 # Install the compatibility branch
 
 This is a local modification of buqi-code/buqi-minimax-h3-multigpu (MIT), not a new algorithm.
-The branch is `fix/comfyui-h3-compat`. A public fork/PR URL is not available yet;
-do not expect upstream main to contain these changes until merged.
+The branch is `fix/comfyui-h3-compat` in the
+[RagnarokChan fork](https://github.com/RagnarokChan/buqi-minimax-h3-multigpu).
+Do not expect upstream main to contain these changes until merged.
+
+To obtain the compatibility branch, clone it beside an existing ComfyUI checkout:
+
+```bash
+git clone --branch fix/comfyui-h3-compat https://github.com/RagnarokChan/buqi-minimax-h3-multigpu.git
+```
+
+If you already have this checkout, keep it; do not clone over an existing folder.
 
 ## Existing local checkout
 

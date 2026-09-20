@@ -6,6 +6,10 @@ ownership of the author's Ulysses implementation.
 
 ## 2026-09-21 — review candidate
 
+Publication preparation: INSTALL.md now names the public fork and exact branch
+so reviewers can reproduce the tested source. Documentation-only change; no
+runtime algorithms or test measurements were changed for publication.
+
 Runtime/test commit: `e5f08a124af6b6a01af4ebc8028cd209f6c32c26`.
 
 Follow-up runtime fix: `cbb34be`, explicitly catch ComfyUI's cancellation type

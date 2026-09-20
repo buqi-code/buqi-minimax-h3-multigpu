@@ -1,6 +1,7 @@
-# PR draft: Fix current H3 conditioning and synchronize worker patches
+# Fix current H3 conditioning and synchronize worker patches
 
-Draft only — not posted. Target: buqi-code/buqi-minimax-h3-multigpu main.
+Target: buqi-code/buqi-minimax-h3-multigpu main, from RagnarokChan's
+`fix/comfyui-h3-compat` branch. This file contains the author-facing PR text.
 
 ## Summary
 

@@ -88,4 +88,5 @@ The submission branch retains author history. Local contributions use the
 GitHub-provided noreply identity; no personal email or raw machine histories
 belong in the public branch. Publish only the sanitized evidence summary.
 The archive branch is a local safety copy, not a branch to push with this PR.
-PR_BUQI.md and COMFYUI_PROPOSAL.md are drafts, not posted discussions.
+PR_BUQI.md contains the author-facing compatibility PR text.
+COMFYUI_PROPOSAL.md is still a draft, not a posted ComfyUI discussion.
