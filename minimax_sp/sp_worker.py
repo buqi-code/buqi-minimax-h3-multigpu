@@ -38,7 +38,11 @@ def main():
         headroom = None if args.reserve_vram is None else int(args.reserve_vram * 2**30)
         comfy_aimdo.control.init(simple_vram_headroom=headroom, nvml_pressure=not args.disable_nvml_pressure)
     # rendezvous before loading 21GB of weights so the TCP init doesn't time out
-    dist.init_process_group("nccl", init_method=f"tcp://127.0.0.1:{a.port}",
+    # Use the same explicit store path as rank0. Mixing store= with tcp://
+    # rendezvous introduces a default_pg key prefix on only the latter path.
+    store = dist.TCPStore("127.0.0.1", a.port, a.world, False,
+                          timeout=timedelta(minutes=40), wait_for_workers=False)
+    dist.init_process_group("nccl", store=store,
                             rank=a.rank, world_size=a.world, timeout=timedelta(minutes=40),
                             device_id=torch.device("cuda", 0))
     obj_pg = dist.new_group(backend="gloo", timeout=timedelta(minutes=40))
