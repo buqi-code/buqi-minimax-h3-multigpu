@@ -9,7 +9,10 @@ Launch ComfyUI with all target GPUs visible, e.g. for 2 GPUs:
     python main.py --cuda-device 0,1 --highvram
 """
 
+import inspect
 import logging
+import subprocess
+import os
 import sys
 
 import torch
@@ -21,13 +24,29 @@ import folder_paths
 from . import sp_group
 from . import sp_vae
 
-try:
-    from comfy.ldm.minimax.model import MiniMaxH3Model  # noqa: F401
-except ImportError:
-    raise RuntimeError(
-        "buqi-minimax-h3-multigpu requires a ComfyUI build that ships the "
-        "MiniMax-H3 model (comfy.ldm.minimax.model); update ComfyUI to >= 0.30.0"
-    )
+from comfy.ldm.minimax.model import MiniMaxH3Model, PackedLayout
+from comfy.patcher_extension import CallbacksMP
+import comfyui_version
+
+
+def check_h3_api():
+    required = {"minimax_payload", "denoise_mask", "audio_denoise_mask"}
+    if not required.issubset(inspect.signature(MiniMaxH3Model._forward).parameters):
+        raise RuntimeError("MiniMax SP needs the current H3 forward with audio/video denoise masks")
+    if "frame_count" in inspect.signature(PackedLayout).parameters:
+        raise RuntimeError("MiniMax SP compatibility branch requires the current PackedLayout API")
+    root = os.path.dirname(os.path.abspath(folder_paths.__file__))
+    try:
+        commit = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"],
+                                         text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
+    except (OSError, subprocess.SubprocessError):
+        commit = "unknown"
+    logging.info("[minimax_sp] ComfyUI %s commit=%s MiniMaxH3Model%s",
+                 comfyui_version.__version__, commit, inspect.signature(MiniMaxH3Model))
+    if commit != "99073836d45f66053c45ba8564984e6def9cebba":
+        logging.warning("[minimax_sp] this ComfyUI revision is unverified; run tests/test_current_api.py "
+                        "and enable MINIMAX_SP_VERIFY=1 before relying on outputs")
+
 
 
 def resolve_devices(devices, world):
@@ -36,7 +55,6 @@ def resolve_devices(devices, world):
         if len(picked) != world:
             raise ValueError(f'devices "{devices}" lists {len(picked)} GPUs, world_size is {world}')
         return picked
-    import os
     env = os.environ.get("MINIMAX_SP_DEVICES")
     if env:
         picked = [d.strip() for d in env.split(",")]
@@ -72,6 +90,10 @@ class MiniMaxH3SPUNETLoader(io.ComfyNode):
 
     @classmethod
     def execute(cls, unet_name, weight_dtype, world_size, devices="auto") -> io.NodeOutput:
+        if world_size > 1:
+            check_h3_api()
+            if os.environ.get("MINIMAX_SP_EXCHANGE", "all_to_all") != "all_to_all":
+                raise RuntimeError("Use MINIMAX_SP_EXCHANGE=all_to_all; head-sliced QKV is not validated")
         model_options = {}
         if weight_dtype == "fp8_e4m3fn":
             model_options["dtype"] = torch.float8_e4m3fn
@@ -90,7 +112,10 @@ class MiniMaxH3SPUNETLoader(io.ComfyNode):
             raise RuntimeError("multi-GPU SP needs NCCL, which is not available on native Windows; "
                                "run ComfyUI inside WSL2 or on Linux")
 
-        heads = model.model.diffusion_model.blocks[0].attn.heads
+        dit = model.get_model_object("diffusion_model")
+        if not isinstance(dit, MiniMaxH3Model):
+            raise RuntimeError("MiniMax SP loader requires a MiniMaxH3Model checkpoint")
+        heads = dit.blocks[0].attn.heads
         if heads % world_size:
             raise ValueError(f"world_size {world_size} must divide the {heads} attention heads "
                              "(valid: 1, 2, 4, 7, 8)")
@@ -105,14 +130,18 @@ class MiniMaxH3SPUNETLoader(io.ComfyNode):
         model = model.clone()
         dit = model.get_model_object("diffusion_model")
 
-        def sp_entry(x, timestep, context, transformer_options={}, minimax_payload=None, **kwargs):
+        def sp_entry(x, timestep, context, transformer_options=None, minimax_payload=None,
+                     denoise_mask=None, audio_denoise_mask=None, **kwargs):
             group = sp_group.get_group(world_size, unet_name, weight_dtype, picked)
-            return group.forward(dit, x, timestep, context, transformer_options, minimax_payload)
+            return group.forward(dit, x, timestep, context, transformer_options or {}, minimax_payload,
+                                 denoise_mask, audio_denoise_mask)
 
-        # patch _forward instead of adding a DIFFUSION_MODEL wrapper: a wrapper that
-        # never calls executor() short-circuits the chain and silently disables other
-        # wrappers on the same hook. forward() resolves _forward per call, so this
-        # keeps the chain intact with the sharded path as its inner call.
+        def sync_patches(patcher):
+            group = sp_group.get_group(world_size, unet_name, weight_dtype, picked)
+            group.sync_patches(patcher)
+
+        model.add_callback_with_key(CallbacksMP.ON_PRE_RUN, "minimax_sp_lora", sync_patches)
+        # ModelPatcher installs/restores the inner call without bypassing outer wrappers.
         model.add_object_patch("diffusion_model._forward", sp_entry)
         logging.info(f"[minimax_sp] sequence parallel enabled, world_size={world_size} devices={picked}")
         return io.NodeOutput(model)
