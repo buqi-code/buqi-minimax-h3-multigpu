@@ -119,6 +119,21 @@ class PatchSyncTests(unittest.TestCase):
             group.check_alive()
         group.destroy.assert_called_once()
 
+    def test_comfy_cancellation_is_not_an_exception(self):
+        import comfy.model_management
+        cancelled = comfy.model_management.InterruptProcessingException
+        self.assertFalse(issubclass(cancelled, Exception))
+        group = SPGroup.__new__(SPGroup)
+        group.world, group.obj_pg, group.patches_ready = 2, None, True
+        group.check_alive, group.destroy = Mock(), Mock()
+        with patch("minimax_sp.sp_group.build_meta", return_value={}), \
+                patch("minimax_sp.sp_group.ordered_tensors", return_value=[]), \
+                patch("minimax_sp.sp_group.dist.broadcast_object_list"), \
+                patch("minimax_sp.sp_group.spf.sp_forward", side_effect=cancelled):
+            with self.assertRaises(cancelled):
+                group.forward(None, [torch.zeros(1)], None, None, {}, None)
+        group.destroy.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
