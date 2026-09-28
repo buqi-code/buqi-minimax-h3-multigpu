@@ -14,5 +14,7 @@ def setup():
         if (root / "comfy/ldm/minimax/model.py").is_file():
             sys.path.insert(0, str(root))
             sys.path.insert(0, str(ROOT))
+            from comfy.cli_args import args
+            args.cpu = True
             return root
     raise RuntimeError("Set COMFYUI_ROOT to the existing reviewed ComfyUI checkout")

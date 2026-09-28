@@ -5,6 +5,9 @@ from pathlib import Path
 import sys
 import unittest
 
+from bootstrap import setup
+setup()
+
 
 class PackageDiscoveryTests(unittest.TestCase):
     def test_root_package_exports_comfy_entrypoint(self):
