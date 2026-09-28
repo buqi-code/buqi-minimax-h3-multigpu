@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.git/
+.github/
+tests/
+*.log
+*.tmp
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx

@@ -2,288 +2,149 @@
 
 **English** | [中文](README_zh.md) | [日本語](README_ja.md)
 
-Real multi-GPU inference for **MiniMax-H3** in ComfyUI — not just the denoise
-loop, the **VAE decode** is parallelized too. Two drop-in nodes,
-**no approximation and no precision loss**.
+A ComfyUI custom node that runs the MiniMax H3 DiT with Ulysses sequence parallelism across multiple NVIDIA GPUs.
 
-MiniMax-H3 is a joint video+audio generation model: one packed-token DiT
-produces the video *and* its soundtrack (text-to-video / image-to-video with
-synchronized audio), then a video VAE turns the latents into pixels. This repo
-spreads both stages across 2/4/7/8 GPUs:
+## Compatibility and status
 
-- **`MiniMaxH3SPUNETLoader`** — replaces `UNETLoader`. Shards the DiT's packed
-  sequence across ranks with [DeepSpeed-Ulysses](https://arxiv.org/abs/2309.14509):
-  every rank computes exact full attention for a subset of heads, so the math
-  is unchanged. Denoise **1.94×** on 2 GPUs, **6.65×** on 8 (below).
-- **`MiniMaxH3SPVAEDecode`** — optional replacement for `VAEDecode`. Spreads
-  the video VAE's temporal chunks across the same ranks. VAE decode
-  **1.70×** on 2 GPUs, **5.99×** on 8.
-- End-to-end **1.95×** on 2 GPUs at 480p and **6.28×** on 8 GPUs at 1080p;
-  profile-driven, PCIe-friendly (measured without NVLink).
+- Requires the MiniMax H3 API introduced at or after ComfyUI commit **`8d534945`**; startup uses a runtime capability check instead of a release-version claim.
+- Tested against the current ComfyUI 0.37 development commit **`7fbcfa8be9a8f47cf905ec47978b5bd754959ea7`**.
+- The old ComfyUI 0.30 integration belongs to older releases; the main branch no longer claims compatibility with it.
+- Platform: Linux or WSL2 with PyTorch/NCCL. Native Windows multi-GPU is not supported.
+- `world_size` must divide MiniMax H3's 56 attention heads: **1, 2, 4, 7, or 8**.
 
-### On accuracy
-
-Every GPU still evaluates exact attention over the whole sequence — nothing is
-approximated, quantized further, masked, or cached. The result is therefore
-*mathematically* equivalent to single-GPU sampling, but it is **not bit-identical**
-to it: attention runs over 56/`world_size` heads per rank, and the attention
-kernel picks its reduction order from the head count, so floating-point rounding
-lands differently. Measured on the DiT's own output, the deviation from a single
-GPU is **≤ 4.2e-6 relative** (audio: exactly 0) — three orders of magnitude below
-bfloat16 resolution (7.8e-3), with no systematic bias.
-
-Verify it yourself with `tests/latent_parity.py`, which compares the velocity
-tensors the DiT produces rather than a hash of the encoded video (H.264 is lossy
-and hides differences of this size in either direction).
-
-Designed for the community's common setups first: **2 GPUs** (works from 1 to 8).
-
-## Requirements
-
-- Linux (or WSL2 on Windows — NCCL is not available on native Windows)
-- ComfyUI **>= 0.30.0** (the release that ships `comfy.ldm.minimax.model`); the
-  loader refuses to import on older builds
-- MiniMax-H3 model files (DiT, Qwen3-VL text encoder, video/audio VAEs) installed
-  as usual into `diffusion_models/`, `text_encoders/`, `vae/` — get them from the
-  official MiniMax-H3 release; this repo contains code only
-- PyTorch with NCCL (stock ComfyUI wheels include it)
-- `world_size` must divide the 56 attention heads: **1, 2, 4, 7, 8**
+The CPU suite checks package discovery, current API contracts, fail-fast behavior, patch synchronization, and two-rank Gloo parity. Current-commit GPU execution still requires the manual self-hosted acceptance workflow or the commands below; do not interpret CPU tests as a GPU performance claim.
 
 ## Install
 
+Clone the repository directly as one ComfyUI custom-node directory:
+
 ```bash
-cd ComfyUI/custom_nodes
+cd /path/to/ComfyUI/custom_nodes
 git clone https://github.com/buqi-code/buqi-minimax-h3-multigpu.git
 ```
 
-No extra Python dependencies.
+Restart ComfyUI. No extra pip package is required by this node; PyTorch and ComfyUI are intentionally not declared as pip dependencies.
 
-## Quick start (2 GPUs)
+## Models and INT8
 
-1. Start ComfyUI with both GPUs visible:
+Current example filenames are:
 
-   ```bash
-   python main.py --cuda-device 0,1 --highvram
-   ```
+- DiT: `minimax_h3_fl2va_pruned_int8_convrot.safetensors`
+- Reference DiT: `minimax_h3_ref2va_pruned_int8_convrot.safetensors`
+- Text encoder: `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`
+- Video VAE: `minimax_h3_video_vae_int8_convrot.safetensors`
+- Audio VAE: `minimax_h3_audio_vae_fp32.safetensors`
+- Turbo LoRA: `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors`
 
-2. Replace `UNETLoader` with **MiniMax H3 Multi-GPU Loader (Ulysses SP)** in your
-   workflow. `world_size=2` is the default; leave `devices=auto`.
+For a pre-quantized INT8/ConvRot checkpoint, select **`weight_dtype=default`**. Its quantization metadata is loaded by ComfyUI; do not force another dtype in the SP loader.
 
-3. Queue a prompt. First run spawns one worker process per extra GPU and loads a
-   copy of the DiT on each (~21 GB fp8 per card); later prompts reuse them.
+Use the standard **`VAEDecode`** node for both official INT8 and FP16 video VAEs. This preserves ComfyUI's quantized metadata, streaming behavior, and memory policy. The old `MiniMaxH3SPVAEDecode` node ID remains only so existing workflows load: it logs one deprecation warning and calls the same official `vae.decode` path; it no longer performs parallel VAE decode.
 
-An API-format example is in [`examples/workflow_api_2gpu.json`](examples/workflow_api_2gpu.json);
-a ready-to-import graph workflow (drag & drop into the ComfyUI canvas) is
-[`examples/workflow_ui_2gpu.json`](examples/workflow_ui_2gpu.json).
-
-## Node inputs
-
-| input | default | meaning |
-|---|---|---|
-| `unet_name` | — | H3 DiT checkpoint, same as `UNETLoader` |
-| `weight_dtype` | `default` | same options as `UNETLoader`; fp8 recommended |
-| `world_size` | `2` | GPUs to shard across (1/2/4/7/8). `1` = plain single-GPU load |
-| `devices` | `auto` | physical CUDA ids, e.g. `"0,1"`. First id must be the GPU ComfyUI itself runs on. `auto` = `MINIMAX_SP_DEVICES` env if set, else the first `world_size` GPUs |
-
-`world_size=1` passes through untouched, so a workflow with this node also runs
-on a single-GPU machine.
-
-## VRAM & resolution guidance
-
-Sequence parallelism replicates the full DiT on every GPU (weights are not
-split), so per-card VRAM is the same as single-GPU — the win is speed, and it
-also lets you hold larger activations.
-
-| weights | DiT per card | practical cards |
-|---|---|---|
-| fp8 (recommended) | ~21 GB | 24 GB cards up to 720p, comfortable at 480p |
-| bf16 (`default` dtype from bf16 checkpoint) | ~40 GB | 48 GB+ cards |
-
-Measured on up to 8× RTX PRO 5000 Blackwell (72 GB, PCIe 5.0, **no NVLink**), fp8,
-124 frames, 20 steps. Every number is steady state — the first sharded decode of
-a session pays a one-time weight handover, so each configuration was measured on
-a second run:
-
-| shape | GPUs | 1 GPU | multi-GPU | end-to-end | denoise | VAE | cost per second of output |
-|---|---|---|---|---|---|---|---|
-| 832×480 | 2 | 89.7 s | 46.7 s | **1.95×** | 1.94× | 1.70× | **1.03×** |
-| 832×480 | 4 | 91.2 s | 27.0 s | **3.37×** | 3.41× | 3.27× | **1.19×** |
-| 832×480 | 8 | 91.1 s | 19.2 s | **4.74×** | 4.86× | 5.99× | 1.69× |
-| 1280×736 | 8 | 301.6 s | 57.8 s | **5.22×** | 5.46× | 5.11× | 1.53× |
-| 1920×1088 | 8 | 1131.8 s | 180.2 s | **6.28×** | 6.65× | 5.09× | **1.27×** |
-
-The last column is `GPUs / speedup` — how much more GPU-time a second of video
-costs than on one card. Two GPUs are nearly free (+3 %) and four are cheap
-(+19 %); eight only pay off on big canvases, because there the denoise loop grows
-while the fixed tail (text encoder, muxing) stays flat and the exchange stays
-proportional to the work.
-
-The VAE rows need `MiniMaxH3SPVAEDecode` (see below). Its ceiling is set by how
-the temporal chunks divide — these clips have 7, so two GPUs split them 4/3 and
-cannot beat 1.75×, while eight GPUs get one chunk each.
-
-Where the denoise step goes at 480p on 2 GPUs, from the op-level profile
-(`MINIMAX_SP_PROFILE_OPS=1`, per step, per rank): attention+output exchange
-856 ms (timed together because they overlap), MLP 657 ms, gather+qkv_proj 325 ms,
-out_proj 83 ms, modulation+norms 76 ms, QK-norm+RoPE 27 ms. The transformer GEMMs
-already run at 270–370 TFLOPS (fp8) and attention at ~176 TFLOPS, so there is
-nothing left to win in the math itself — the only cost that does not shard is the
-inter-GPU exchange, which started at ~21 % of a step (481 ms) and is now largely
-hidden behind compute.
-
-At 1080p a single GPU also starts paying for memory pressure that the sharded run
-avoids, which is part of why that row scales best.
-
-## Resolution constraints
-
-Heights/widths follow the stock MiniMax-H3 rules: canvas is rounded to 32 px and
-the latent (px/16) must be divisible by the patch (2), so stick to the standard
-grids — 832×480, 1280×736, 1920×1088 etc. `height=720` is **not** a valid canvas
-(latent height 45 is odd); use 736.
-
-## Multi-GPU VAE decode (optional)
-
-Replace `VAEDecode` with **MiniMax H3 Multi-GPU VAE Decode**
-(`MiniMaxH3SPVAEDecode`) — same two inputs, same output — and the video VAE's
-temporal chunks are spread over the same GPUs the SP group already holds.
-
-`decode_temporal` walks the latent one chunk at a time and each chunk only reads a
-slice of it, so the chunks are independent. Only that leaf work is distributed:
-every spatial tile blend, temporal blend and canvas write stays in the official
-code path on rank 0, which is fed the finished chunks. The result is bit-identical
-(verified below).
-
-The workers receive the VAE weights over NCCL from rank 0 on first use rather than
-loading a file themselves, so the sharded decode always uses exactly the
-checkpoint you loaded, including custom paths. That transfer is ~4.85 GiB and
-costs ~2.3 s once per session.
-
-This is opt-in because it is not free: each worker holds the video VAE (~5 GB) on
-top of the DiT, so ~26 GB per card at fp8. On 24 GB cards, keep using the stock
-`VAEDecode`. The node falls back to the stock decode, with a log line, whenever
-sharding does not apply: no SP group running, `world_size` 1, a VAE that is not
-the H3 video VAE, or a latent with too few chunks to split.
-
-## Verify correctness on your machine
-
-Two tests compare tensors, which is the only meaningful level. The DiT:
-
-```bash
-cd custom_nodes/buqi-minimax-h3-multigpu
-torchrun --nproc_per_node=2 tests/latent_parity.py \
-    --unet minimax_h3_fl2va_pruned_fp8_scaled.safetensors
-```
-
-Runs the stock single-GPU `_forward` as the reference and the sequence-parallel
-forward on the same inputs, for both exchange strategies. Expect
-`ag vs a2a … exact=True` and a `vs 1gpu` relative deviation around 4e-6.
-
-And the VAE:
-
-```bash
-torchrun --nproc_per_node=2 tests/vae_parity.py --handover
-```
-
-Has each worker decode its chunks and rank 0 decode the same slices itself, then
-compares them, with `--handover` rebuilding the worker VAE from rank 0's
-broadcast weights exactly as the group does. Expect every chunk `exact=True`.
-
-### Do not compare encoded video
-
-`tests/selftest.py` runs a job both ways end to end, but it is only a smoke test.
-Hashing the output video proves nothing: the encoded container is **not
-byte-reproducible**. Three runs of the identical stock pipeline, same seed and
-same inputs, produced three different hashes (`529324c6…` at 736142 bytes,
-`c1c1c01c…` and `1bd76f6c…` both at 736204 bytes). A hash comparison there will
-report failures that do not exist, and can hide ones that do.
-
-## Profiling
-
-```bash
-MINIMAX_SP_PROFILE_OPS=1 MINIMAX_SP_PROFILE=1 python main.py --cuda-device 0,1 --highvram
-```
-
-Logs a per-step breakdown by region (attention, MLP, gather, exchange, …) plus the
-per-step dispatch cost, which is what the tuning above was based on.
-`tests/profile_phases.py` does the same at node granularity over the websocket API.
-
-## Environment variables
-
-| variable | meaning |
+| VAE path | Supported behavior |
 |---|---|
-| `MINIMAX_SP_DEVICES` | fallback device list when `devices=auto`, e.g. `0,1` |
-| `MINIMAX_SP_LOGDIR` | worker log directory (default: system temp) |
-| `MINIMAX_SP_AG_CHUNKS` | sub-chunks the hidden-state gather is split into so it overlaps the projection (default 4; 1 disables overlap) |
-| `MINIMAX_SP_ATTN_CHUNKS` | head chunks attention is split into so the output exchange overlaps it (default 4; 1 disables overlap) |
-| `MINIMAX_SP_PROFILE` | log per-step dispatch and forward timings |
-| `MINIMAX_SP_PROFILE_OPS` | log the per-step breakdown by region |
+| Standard `VAEDecode` + official INT8 or FP16 video VAE | Recommended; official decode and streaming path |
+| Legacy `MiniMaxH3SPVAEDecode` node | Compatibility alias for standard `vae.decode`; deprecated and not parallel |
+| Audio VAE | Standard `VAEDecodeAudio`; not sharded by this project |
 
-## Troubleshooting
+## Supported workflow surface
 
-- **"world_size N must divide the 56 attention heads"** — use 1/2/4/7/8.
-- **worker died, see .../minimax_sp_worker1.log** — usually VRAM; lower the
-  resolution or use an fp8 checkpoint. The log has the real traceback.
-- **hang at "process group up, waiting for workers to load weights"** — workers
-  load ~21 GB each; first run can take a couple of minutes. Check worker logs.
-- **`devices` mismatch** — the first id in `devices` must be the GPU ComfyUI runs
-  on (`--cuda-device`).
-- One SP group per ComfyUI process: changing checkpoint/dtype/world_size needs a
-  server restart.
+| Feature | Status |
+|---|---|
+| T2V | Supported by the current H3 conditioning path |
+| I2V first frame | Supported |
+| I2V first + last frame | Supported |
+| R2V and chained `MiniMaxH3AddGuide` | Supported |
+| Denoise masks | Supported |
+| PDD/static model options | Supported |
+| Static Turbo LoRA loaded before execution | Supported; patches are synchronized before denoising |
+| Fun ControlNet | Not supported; rejected before distributed execution |
+| Sparse Attention | Not supported; rejected before distributed execution |
+| Dynamic hooks/patches | Not supported; rejected before distributed execution |
+| Stacking with ComfyUI MultiGPU/threaded MultiGPU | Not supported; rejected before distributed execution |
 
-## How it works
+“Supported” describes the capability-checked H3 interface. Run the GPU acceptance tests for the exact hardware, model files, and workflow combination you deploy.
 
-Both nodes shard **whole stages**, not just kernels; nothing is approximated or
-quantized further.
+## SP versus DP
 
-**DiT (denoise loop)** — the H3 DiT processes one packed sequence
-`[text|cond|audio|video]` with 56 attention heads. Ulysses SP keeps the sequence
-row-sharded across ranks; every per-token op (patch proj, modulation, RoPE, MLP)
-is row-local and runs without communication. Only attention crosses ranks —
-each rank computes exact full attention over the *full* sequence for
-56/`world_size` heads. Two exchange strategies are supported and picked by
-world size:
+- **Sequence parallelism (this project):** one prompt is split across GPUs by sequence/head communication. Every rank holds the full DiT weights. It targets lower latency for one generation; it does not divide model-weight VRAM.
+- **Data parallelism:** each GPU runs a separate prompt. It increases throughput, not the latency of one prompt, and needs an external queue/orchestrator.
 
-- `world_size <= 4` broadcasts the modulated hidden state and projects it
-  through only this rank's head rows of `qkv_proj`. Moves `hidden` bytes per
-  row and the three transpose+copy steps of the classic form disappear.
-  Row-slicing the fp8 weight is exact because its scale is per-tensor.
-- `world_size >= 7` keeps the classic all-to-all form
-  (`3 * inner / world` bytes per row).
+Do not stack this SP loader with another MultiGPU wrapper.
 
-For H3 (`hidden` 5376, `inner` 7168) they cost the same at world 4 and
-`all_gather` wins below it (6.04 ms → 2.34 ms per block on PCIe, and achieved
-bandwidth rises 24.9 → 32.2 GB/s because there is no longer a permute in the
-way). Both transfers overlap with the compute around them: the gather is issued
-as async sub-transfers (`MINIMAX_SP_AG_CHUNKS`, default 4) so each chunk's
-projection runs while the next chunk is still in flight, and attention is done
-in head chunks (`MINIMAX_SP_ATTN_CHUNKS`, default 4) so each chunk's output
-exchange flies while the next chunk is computed. Together those hide ~150 ms
-per step. Neither changes any arithmetic; `tests/latent_parity.py` confirms
-bit-identical output at 1, 2, 4 and 8 chunks.
+## Start and device mapping
 
-**VAE decode** — `decode_temporal` walks the latent one chunk at a time and
-each chunk only reads a slice of it, so the chunks are independent. Only that
-leaf work is distributed round-robin across ranks; every spatial tile blend,
-temporal blend and canvas write stays in the official code path on rank 0.
-Workers receive the VAE weights over NCCL from rank 0 on first use (~4.85 GiB,
-~2.3 s once per session), so the sharded decode always uses exactly the
-checkpoint that was loaded.
+Two GPUs:
 
-**Tried and dropped, so nobody has to repeat it.** Profiling ruled these out:
-AdaLN precomputation (upstream pruned weights already factor `t_dim` to an
-8-dim curve basis; the whole branch is 44 M params and 0.06 ms per step),
-fold-in of the text encoder (measured 1.0 s total on the short prompt),
-swapping the gloo control channel for a persistent NCCL one (per-step meta
-broadcast is 0.3 ms), and fusing modulation/norm into a Triton kernel (the
-whole modulation+norm region is 3.4 % of a step). Details in the commit
-history.
+```bash
+cd /path/to/ComfyUI
+MINIMAX_SP_DEVICES=0,1 python main.py --cuda-device 0,1 --highvram
+```
+
+Then replace only `UNETLoader` with `MiniMaxH3SPUNETLoader`. Keep standard `VAEDecode`, especially with the INT8 video VAE.
+
+`devices="auto"` reads `MINIMAX_SP_DEVICES` first, then the physical identifiers in `CUDA_VISIBLE_DEVICES` (including values set by `--cuda-device 2,3`). It does not replace those with logical `0,1`. Explicit mappings must be unique, contain exactly `world_size` visible physical identifiers, and start with ComfyUI's primary visible GPU. `world_size=1` behaves as a normal single-GPU load.
+
+## Examples
+
+| File | Format | Coverage |
+|---|---|---|
+| [`examples/workflow_ui_2gpu.json`](examples/workflow_ui_2gpu.json) | UI | Direct copy of the checked-out official “Image to Video (MiniMax H3)” blueprint with only `UNETLoader` replaced by `MiniMaxH3SPUNETLoader`; optional first/last inputs cover T2V, first-frame I2V, first+last I2V, and its static Turbo LoRA switch |
+| [`examples/workflow_api_t2v_2gpu.json`](examples/workflow_api_t2v_2gpu.json) | API | T2V |
+| [`examples/workflow_api_2gpu.json`](examples/workflow_api_2gpu.json) | API | First-frame I2V |
+| [`examples/workflow_api_i2v_first_last_2gpu.json`](examples/workflow_api_i2v_first_last_2gpu.json) | API | First+last-frame I2V |
+| [`examples/workflow_api_r2v_2gpu.json`](examples/workflow_api_r2v_2gpu.json) | API | R2V reference image |
+| [`examples/workflow_api_addguide_2gpu.json`](examples/workflow_api_addguide_2gpu.json) | API | Arbitrary-frame AddGuide |
+| [`examples/workflow_api_turbo_lora_2gpu.json`](examples/workflow_api_turbo_lora_2gpu.json) | API | Static 8-step Turbo LoRA |
+
+The API variants follow the node schemas in the tested development commit but are not claimed as upstream-exported templates. For a deployment-specific API graph, import the UI workflow, configure and validate it with your installed models, enable ComfyUI Developer Mode, then use **Save (API Format)**.
+
+API image names beginning with `REPLACE_WITH_` are intentional placeholders. Put your own files in `ComfyUI/input` and replace those values before submission. The UI workflow has no repository image dependency.
+
+## Verification
+
+CPU checks:
+
+```bash
+cd /path/to/ComfyUI/custom_nodes/buqi-minimax-h3-multigpu
+COMFYUI_ROOT=/path/to/ComfyUI PYTHONPATH=/path/to/ComfyUI \
+  python -m unittest discover -s tests -p 'test_*.py' -v
+COMFYUI_ROOT=/path/to/ComfyUI torchrun --standalone --nproc-per-node=2 tests/test_current_api.py
+python -m compileall -q __init__.py minimax_sp tests
+python -c 'import json,pathlib; [json.loads(p.read_text()) for p in pathlib.Path("examples").glob("*.json")]'
+```
+
+Two-GPU checks:
+
+```bash
+COMFYUI_ROOT=/path/to/ComfyUI torchrun --standalone --nproc-per-node=2 \
+  tests/latent_parity.py --unet minimax_h3_fl2va_pruned_fp8_scaled.safetensors
+COMFYUI_ROOT=/path/to/ComfyUI python tests/runtime_recovery.py \
+  --unet minimax_h3_fl2va_pruned_fp8_scaled.safetensors --devices auto
+```
+
+The parity and lifecycle scripts exit nonzero on failure. `tests/selftest.py` is an end-to-end server smoke test and also propagates submission/execution failures, but encoded-video hashes are informational rather than a numerical parity check.
+
+## Timeouts, logs, and troubleshooting
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `MINIMAX_SP_DEVICES` | `CUDA_VISIBLE_DEVICES` | Optional physical device mapping used by `devices=auto` |
+| `MINIMAX_SP_STARTUP_TIMEOUT` | 300 s | Worker/process-group startup timeout |
+| `MINIMAX_SP_COLLECTIVE_TIMEOUT` | 120 s | NCCL collective timeout |
+| `MINIMAX_SP_LOGDIR` | system temp directory | Worker log directory (`minimax_sp_worker<N>.log`) |
+| `MINIMAX_SP_VERIFY=1` | off | Compare the first SP result with native H3 before accepting it |
+| `MINIMAX_SP_PROFILE=1` | off | Forward timing logs |
+| `MINIMAX_SP_PROFILE_OPS=1` | off | Per-region timing logs |
+
+Common failures:
+
+- **Node is missing after clone:** confirm the repository directory itself is under `custom_nodes`, contains the root `__init__.py`, and inspect the ComfyUI startup traceback.
+- **Native Windows error:** use WSL2 or Linux; NCCL is required.
+- **GPU visibility/P2P/startup probe failure:** verify `--cuda-device`, `MINIMAX_SP_DEVICES`, `nvidia-smi`, and NCCL/P2P availability. Increase `MINIMAX_SP_STARTUP_TIMEOUT` only if model loading is genuinely slow.
+- **Collective timeout or worker exit:** inspect every worker log in `MINIMAX_SP_LOGDIR`; the rank-specific traceback is authoritative. Fix the underlying OOM, device mapping, or unsupported patch instead of repeatedly extending the timeout.
+- **Deprecated VAE node warning:** replace `MiniMaxH3SPVAEDecode` with standard `VAEDecode`; both now call the official decode path.
+- **Changed model/dtype/world size:** restart ComfyUI before creating a different SP group.
 
 ## License
 
-MIT (see [LICENSE](LICENSE)).
-
----
-
-Keywords: MiniMax H3, MiniMax-H3, ComfyUI, ComfyUI custom node, multi-GPU, 多卡,
-多卡并行, 并行推理, sequence parallelism, Ulysses, video generation, audio
-generation, 视频生成, 音画同步, ビデオ生成, H3 加速, multi GPU inference.
+MIT; see [LICENSE](LICENSE).

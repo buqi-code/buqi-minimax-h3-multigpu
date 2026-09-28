@@ -1,0 +1,22 @@
+[project]
+name = "buqi-minimax-h3-multigpu"
+version = "0.1.0"
+description = "Sequence-parallel multi-GPU loader for MiniMax H3 in ComfyUI"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/buqi-code/buqi-minimax-h3-multigpu"
+Issues = "https://github.com/buqi-code/buqi-minimax-h3-multigpu/issues"
+
+[tool.comfy]
+PublisherId = "buqi-code"
+DisplayName = "MiniMax H3 Multi-GPU"
+Icon = ""
+
+[tool.minimax-sp.compatibility]
+minimum-h3-api-commit = "8d534945"
+tested-comfyui-commit = "7fbcfa8be9a8f47cf905ec47978b5bd754959ea7"
+runtime-check = "minimax_sp.check_h3_api"

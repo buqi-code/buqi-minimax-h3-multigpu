@@ -20,7 +20,7 @@ from selftest import build_prompt  # noqa: E402
 
 async def run_one(session, a, sp, run_idx=0):
     client_id = str(uuid.uuid4())
-    prompt = build_prompt(a, sp, sp_vae=a.sp_vae and sp > 1)
+    prompt = build_prompt(a, sp)
     # defeat the server's execution cache so every phase is really measured
     prompt["i2v"]["inputs"]["prompt"] += " " * run_idx
     marks = []  # (node_id_or_None, t)
@@ -95,12 +95,9 @@ def main():
     ap.add_argument("--length", type=int, default=124)
     ap.add_argument("--steps", type=int, default=20)
     ap.add_argument("--seed", type=int, default=42424242)
-    ap.add_argument("--sp-vae", action="store_true",
-                    help="route the video decode through MiniMaxH3SPVAEDecode")
     ap.add_argument("--out", default="/root/profile_results.jsonl")
     a = ap.parse_args()
     a.modes = [int(x) for x in a.modes.split(",")]
-    a.sp = max(a.modes)  # build_prompt only needs a valid sp>1 shape; modes drive runs
     asyncio.run(main_async(a))
 
 

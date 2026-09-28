@@ -3,9 +3,10 @@
   "clip": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "type": "minimax", "device": "default"}},
   "vae_video": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"}},
   "vae_audio": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"}},
-  "first_frame": {"class_type": "LoadImage", "inputs": {"image": "REPLACE_WITH_INPUT_IMAGE.png"}},
-  "conditioning": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["clip", 0], "vae": ["vae_video", 0], "first_frame": ["first_frame", 0], "prompt": "Describe the scene, motion, dialogue, and sound.", "width": 832, "height": 480, "length": 124}},
-  "guider": {"class_type": "BasicGuider", "inputs": {"model": ["unet", 0], "conditioning": ["conditioning", 0]}},
+  "guide_image": {"class_type": "LoadImage", "inputs": {"image": "REPLACE_WITH_GUIDE_IMAGE.png"}},
+  "conditioning": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["clip", 0], "vae": ["vae_video", 0], "prompt": "Describe the scene and how it reaches the guide frame.", "width": 832, "height": 480, "length": 124}},
+  "guide": {"class_type": "MiniMaxH3AddGuide", "inputs": {"positive": ["conditioning", 0], "vae": ["vae_video", 0], "latent": ["conditioning", 1], "image": ["guide_image", 0], "frame_idx": 51}},
+  "guider": {"class_type": "BasicGuider", "inputs": {"model": ["unet", 0], "conditioning": ["guide", 0]}},
   "noise": {"class_type": "RandomNoise", "inputs": {"noise_seed": 42424242}},
   "sampler": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
   "scheduler": {"class_type": "BasicScheduler", "inputs": {"model": ["unet", 0], "scheduler": "simple", "steps": 20, "denoise": 1.0}},
@@ -13,5 +14,5 @@
   "decode_video": {"class_type": "VAEDecode", "inputs": {"samples": ["sample", 0], "vae": ["vae_video", 0]}},
   "decode_audio": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["sample", 0], "vae": ["vae_audio", 0]}},
   "create_video": {"class_type": "CreateVideo", "inputs": {"images": ["decode_video", 0], "audio": ["decode_audio", 0], "fps": 24.0, "bit_depth": 8}},
-  "save": {"class_type": "SaveVideo", "inputs": {"video": ["create_video", 0], "filename_prefix": "video/minimax_h3_sp_i2v", "format": "auto", "codec": "auto"}}
+  "save": {"class_type": "SaveVideo", "inputs": {"video": ["create_video", 0], "filename_prefix": "video/minimax_h3_sp_addguide", "format": "auto", "codec": "auto"}}
 }
