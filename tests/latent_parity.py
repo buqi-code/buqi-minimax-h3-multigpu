@@ -2,21 +2,29 @@
 
 Compares the velocity tensors the DiT actually produces, so nothing is hidden by
 the VAE or by lossy video encoding. Runs the official MiniMaxH3Model._forward as
-the reference on rank 0 and the sequence-parallel forward on all ranks, for both
-exchange strategies, and reports max absolute deviation.
+the reference on rank 0 and the all-to-all sequence-parallel forward on all ranks,
+then reports max absolute deviation.
 
     torchrun --nproc_per_node=2 tests/latent_parity.py --unet <file.safetensors>
 """
 import argparse
 import os
+from pathlib import Path
 import sys
 from datetime import timedelta
 
 import torch
 import torch.distributed as dist
 
-sys.path.insert(0, os.environ.get("COMFY_ROOT", "/root/comfy/ComfyUI"))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+def configure_imports(comfyui_root):
+    if not comfyui_root:
+        raise RuntimeError("Set COMFYUI_ROOT or pass --comfyui-root")
+    root = Path(comfyui_root).expanduser().resolve()
+    if not (root / "comfy/ldm/minimax/model.py").is_file():
+        raise RuntimeError(f"Not a ComfyUI checkout: {root}")
+    sys.path.insert(0, str(root))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def build_inputs(dit, args, device, dtype):
@@ -32,13 +40,17 @@ def build_inputs(dit, args, device, dtype):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--comfyui-root", default=os.environ.get("COMFYUI_ROOT"))
     ap.add_argument("--unet", required=True)
     ap.add_argument("--width", type=int, default=832)
     ap.add_argument("--height", type=int, default=480)
     ap.add_argument("--latent-t", type=int, default=32)
     ap.add_argument("--audio-t", type=int, default=216)
     ap.add_argument("--text-len", type=int, default=64)
+    ap.add_argument("--atol", type=float, default=1e-4)
+    ap.add_argument("--rtol", type=float, default=1e-3)
     args = ap.parse_args()
+    configure_imports(args.comfyui_root)
 
     dist.init_process_group("nccl", timeout=timedelta(minutes=40),
                             device_id=torch.device("cuda", int(os.environ["LOCAL_RANK"])))
@@ -58,44 +70,32 @@ def main():
     dtype = next(p for p in dit.parameters()).dtype
 
     x, timestep, context = build_inputs(dit, args, device, dtype)
-    inner = dit.blocks[0].attn.heads * dit.blocks[0].attn.head_dim
 
     with torch.no_grad():
         ref = None
         if rank == 0:
             out = dit._forward(x, timestep, context, transformer_options={})
             ref = [t.float().clone() for t in out]
+        got = spf.sp_forward(dit, x, timestep, context, {}, None, rank, world, None)
+        if rank == 0:
+            got = [tensor.float() for tensor in got]
 
-        results = {}
-        for force_ag in (True, False):
-            if force_ag and not spf.use_allgather(world, dit.hidden_size, inner):
-                continue
-            orig = spf.use_allgather
-            spf.use_allgather = lambda *a, **k: force_ag
-            try:
-                got = spf.sp_forward(dit, x, timestep, context, {}, None, rank, world, None)
-            finally:
-                spf.use_allgather = orig
-            if rank == 0:
-                results["all_gather" if force_ag else "all_to_all"] = [t.float() for t in got]
-
+    failed = False
     if rank == 0:
         print(f"world={world} shapes video={tuple(ref[0].shape)} audio={tuple(ref[1].shape)}")
-        for name, got in results.items():
-            for label, r, g in zip(("video", "audio"), ref, got):
-                d = (g - r).abs()
-                rel = d.max().item() / max(r.abs().max().item(), 1e-12)
-                print(f"  vs 1gpu  {name:<11} {label:<5} max_abs={d.max().item():.3e} "
-                      f"rel={rel:.3e} exact={torch.equal(g, r)} nonzero={int((d > 0).sum())}"
-                      f"/{d.numel()}")
-        if len(results) == 2:
-            ag, a2a = results["all_gather"], results["all_to_all"]
-            for label, g1, g2 in zip(("video", "audio"), ag, a2a):
-                d = (g1 - g2).abs()
-                print(f"  ag vs a2a            {label:<5} max_abs={d.max().item():.3e} "
-                      f"exact={torch.equal(g1, g2)}")
+        for label, expected, actual in zip(("video", "audio"), ref, got):
+            delta = (actual - expected).abs()
+            max_abs = delta.max().item()
+            relative = max_abs / max(expected.abs().max().item(), 1e-12)
+            close = torch.allclose(actual, expected, atol=args.atol, rtol=args.rtol)
+            failed |= not close
+            print(f"  vs 1gpu  all_to_all {label:<5} max_abs={max_abs:.3e} "
+                  f"rel={relative:.3e} close={close} exact={torch.equal(actual, expected)} "
+                  f"nonzero={int((delta > 0).sum())}/{delta.numel()}")
+        print("FAIL: latent parity exceeded tolerance" if failed else "PASS: latent parity within tolerance")
     dist.destroy_process_group()
+    return 1 if rank == 0 and failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,0 +1,51 @@
+name: GPU acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_root:
+        description: Absolute directory containing pre-provisioned ComfyUI model subdirectories
+        required: true
+        type: string
+      unet:
+        description: MiniMax H3 diffusion model filename
+        required: true
+        default: minimax_h3_fl2va_pruned_fp8_scaled.safetensors
+        type: string
+
+jobs:
+  parity:
+    runs-on: [self-hosted, linux, x64, gpu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: comfyanonymous/ComfyUI
+          ref: 7fbcfa8be9a8f47cf905ec47978b5bd754959ea7
+          path: ComfyUI
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ComfyUI/requirements.txt
+      - name: Install ComfyUI dependencies
+        run: python -m pip install -r ComfyUI/requirements.txt
+      - name: Attach pre-provisioned models
+        env:
+          MODEL_ROOT: ${{ inputs.model_root }}
+        run: |
+          test -d "$MODEL_ROOT"
+          rm -rf ComfyUI/models
+          ln -s "$MODEL_ROOT" ComfyUI/models
+      - name: Run two-GPU tensor parity
+        env:
+          COMFYUI_ROOT: ${{ github.workspace }}/ComfyUI
+          PYTHONPATH: ${{ github.workspace }}/ComfyUI
+          UNET: ${{ inputs.unet }}
+        run: torchrun --standalone --nproc-per-node=2 tests/latent_parity.py --unet "$UNET"
+      - name: Run real loader and SPGroup lifecycle smoke
+        env:
+          COMFYUI_ROOT: ${{ github.workspace }}/ComfyUI
+          PYTHONPATH: ${{ github.workspace }}/ComfyUI
+          UNET: ${{ inputs.unet }}
+        run: python tests/runtime_recovery.py --unet "$UNET" --devices auto

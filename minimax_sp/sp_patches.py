@@ -71,10 +71,16 @@ def memory_budget(patcher):
 @contextmanager
 def export_patches(patcher):
     version = patch_version(patcher)
+    keys = tuple(sorted(patcher.patches))
+    if not keys:
+        yield PatchManifest(1, "", hashlib.sha256(b"").hexdigest(), version, keys)
+        return
     with tempfile.TemporaryDirectory(prefix="minimax_sp_patches_") as directory:
+        os.chmod(directory, 0o700)
         path = os.path.join(directory, "patches.pt")
         torch.save(patcher.patches, path)
-        yield PatchManifest(1, path, file_digest(path), version, tuple(sorted(patcher.patches)))
+        os.chmod(path, 0o600)
+        yield PatchManifest(1, path, file_digest(path), version, keys)
 
 
 class WorkerPatches:
@@ -94,16 +100,25 @@ class WorkerPatches:
 
     def apply(self, manifest):
         self.ready = False
-        # Hash and deserialize the same open file. The parent keeps its private directory alive until ACK.
-        with open(manifest.path, "rb") as stream:
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-            if digest != manifest.sha256:
-                raise RuntimeError("patch file digest mismatch")
-            stream.seek(0)
-            patches = torch.load(stream, map_location="cpu", weights_only=False)
+        patcher = self.patcher
+        if not manifest.keys:
+            patches = {}
+            if self.version is None and not patcher.patches:
+                patcher.patches_uuid = manifest.version
+                patcher.model.current_weight_patches_uuid = manifest.version
+                self.version = manifest.version
+                self.ready = True
+                return manifest.ready(self.rank)
+        else:
+            # Hash and deserialize the same open file. The parent keeps its private directory alive until ACK.
+            with open(manifest.path, "rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                if digest != manifest.sha256:
+                    raise RuntimeError("patch file digest mismatch")
+                stream.seek(0)
+                patches = torch.load(stream, map_location="cpu", weights_only=True)
         if tuple(sorted(patches)) != manifest.keys:
             raise RuntimeError("patch manifest keys mismatch")
-        patcher = self.patcher
         patcher.unpatch_model(patcher.offload_device)
         # No public reset/export/version setter exists. Preserve the tested native
         # patch representation (including offsets and strengths) without re-encoding LoRA.

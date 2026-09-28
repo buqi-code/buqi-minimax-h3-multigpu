@@ -1,9 +1,10 @@
 """Protocol tests without loading H3 weights. Real Turbo runs are separate evidence."""
 from dataclasses import replace
 from pathlib import Path
+import stat
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import call, Mock, patch
 
 from bootstrap import setup
 setup()
@@ -14,14 +15,30 @@ from comfy.patcher_extension import CallbacksMP
 from comfy.model_patcher import ModelPatcher
 
 
-def fake_patcher():
-    return SimpleNamespace(patches={"weight": [(0.7, ("diff", (torch.ones(2),)), 1.0, None, None)]},
-                           patches_uuid="four", weight_wrapper_patches={}, hook_patches={},
+def fake_patcher(with_patches=True):
+    patches = {"weight": [(0.7, ("diff", (torch.ones(2),)), 1.0, None, None)]} if with_patches else {}
+    return SimpleNamespace(patches=patches, patches_uuid="four",
+                           weight_wrapper_patches={}, hook_patches={},
                            get_additional_models_with_key=lambda key: [], offload_device="cpu",
                            model=SimpleNamespace(current_weight_patches_uuid=None), unpatch_model=Mock())
 
 
 class PatchSyncTests(unittest.TestCase):
+    def test_initial_empty_manifest_only_marks_worker_ready(self):
+        parent, child = fake_patcher(False), fake_patcher(False)
+        worker = sync.WorkerPatches(child, 1)
+        with patch.object(sync.comfy.model_management, "load_models_gpu") as load:
+            worker.prepare(0, parent.patches_uuid)
+            load.reset_mock()
+            with sync.export_patches(parent) as manifest:
+                self.assertEqual(manifest.path, "")
+                reply = worker.apply(sync.PatchManifest.from_message(manifest.message()))
+            load.assert_not_called()
+        self.assertEqual(reply, manifest.ready(1))
+        self.assertEqual(worker.version, parent.patches_uuid)
+        child.unpatch_model.assert_not_called()
+        worker.require_ready()
+
     def test_switch_and_clear(self):
         parent, child = fake_patcher(), fake_patcher()
         worker = sync.WorkerPatches(child, 1)
@@ -38,14 +55,19 @@ class PatchSyncTests(unittest.TestCase):
                 worker.prepare(0, version)
                 self.assertFalse(worker.ready)
                 with sync.export_patches(parent) as manifest:
-                    path = Path(manifest.path)
+                    path = Path(manifest.path) if manifest.path else None
+                    if path is not None:
+                        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                        self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
                     reply = worker.apply(sync.PatchManifest.from_message(manifest.message()))
                     sync.validate_replies(manifest, [manifest.ready(0), reply], 2)
                     self.assertEqual(len(child.patches), keys)
                     if keys:
                         self.assertEqual(child.patches["weight"][0][0], 0.7)
                     worker.require_ready()
-                self.assertFalse(path.exists())
+                if path is not None:
+                    self.assertFalse(path.exists())
+        self.assertEqual(child.unpatch_model.call_count, 3)
 
     def test_bad_hash_and_keys_cannot_load(self):
         worker = sync.WorkerPatches(fake_patcher(), 1)
@@ -96,7 +118,7 @@ class PatchSyncTests(unittest.TestCase):
 
     def test_rank0_denies_forward_after_rejected_ack(self):
         group = SPGroup.__new__(SPGroup)
-        group.world, group.patch_uuid, group.obj_pg = 2, None, None
+        group.world, group.patch_uuid, group.control_pg = 2, None, None
         group.check_alive, group.destroy = Mock(), Mock()
 
         def gather(replies, local, **kwargs):
@@ -124,53 +146,68 @@ class PatchSyncTests(unittest.TestCase):
         cancelled = comfy.model_management.InterruptProcessingException
         self.assertFalse(issubclass(cancelled, Exception))
         group = SPGroup.__new__(SPGroup)
-        group.world, group.obj_pg, group.patches_ready = 2, None, True
+        group.world, group.control_pg, group.tensor_pg = 2, object(), object()
+        group.patches_ready, group.operation_id, group.verify_pending = True, 0, False
         group.check_alive, group.destroy = Mock(), Mock()
-        with patch("minimax_sp.sp_group.build_meta", return_value={}), \
+        meta = {"video": None, "audio": None, "timestep": None, "context": None, "tags": None,
+                "cond_video": [], "cond_audio": [], "sample_sigmas": None, "denoise_mask": None,
+                "audio_denoise_mask": None, "options": {}}
+
+        def gather(replies, local, **kwargs):
+            replies[:] = [local, local]
+
+        with patch("minimax_sp.sp_group.build_meta", return_value=meta), \
                 patch("minimax_sp.sp_group.ordered_tensors", return_value=[]), \
                 patch("minimax_sp.sp_group.dist.broadcast_object_list"), \
+                patch("minimax_sp.sp_group.dist.all_gather_object", side_effect=gather), \
                 patch("minimax_sp.sp_group.spf.sp_forward", side_effect=cancelled):
             with self.assertRaises(cancelled):
                 group.forward(None, [torch.zeros(1)], None, None, {}, None)
         group.destroy.assert_called_once()
 
-    def test_failed_start_cleans_worker_store_and_group(self):
+    def test_failed_start_cleans_worker_store_and_groups(self):
         from minimax_sp import sp_group
         worker = Mock()
         worker.poll.return_value = None
         captured = []
+        tensor_pg, control_pg = object(), object()
 
         def fail_start(group, *args):
             captured.append(group)
             group.procs = [worker]
-            group.obj_pg, group.store = object(), object()
-            raise RuntimeError("subgroup creation failed")
+            group.tensor_pg, group.control_pg, group.store = tensor_pg, control_pg, object()
+            group._owns_default_pg = True
+            raise RuntimeError("startup probe failed")
 
         with patch.object(SPGroup, "_start", fail_start), \
                 patch.object(sp_group.dist, "is_initialized", side_effect=[False, True]), \
                 patch.object(sp_group.dist, "destroy_process_group") as cleanup:
-            with self.assertRaisesRegex(RuntimeError, "subgroup creation failed"):
+            with self.assertRaisesRegex(RuntimeError, "startup probe failed"):
                 SPGroup(2, "model", "default", ["0", "1"])
-        cleanup.assert_called_once()
+        self.assertEqual(cleanup.call_args_list, [call(tensor_pg), call(control_pg)])
         worker.kill.assert_called_once()
         worker.wait.assert_called_once()
-        self.assertIsNone(captured[0].obj_pg)
+        self.assertIsNone(captured[0].tensor_pg)
+        self.assertIsNone(captured[0].control_pg)
         self.assertIsNone(captured[0].store)
         self.assertFalse(captured[0].patches_ready)
 
     def test_destroy_removes_cached_group_and_is_idempotent(self):
         from minimax_sp import sp_group
         group = SPGroup.__new__(SPGroup)
-        group.procs, group.obj_pg, group.store = [], object(), object()
+        tensor_pg, control_pg = object(), object()
+        group.procs, group.tensor_pg, group.control_pg, group.store = [], tensor_pg, control_pg, object()
+        group._owns_default_pg = True
         with patch.dict(sp_group._GROUPS, {"test": group}, clear=True), \
                 patch.object(sp_group.dist, "is_initialized", side_effect=[True, False]), \
                 patch.object(sp_group.dist, "destroy_process_group") as cleanup:
             group.destroy()
             group.destroy()
             self.assertFalse(sp_group._GROUPS)
-        cleanup.assert_called_once()
+        self.assertEqual(cleanup.call_args_list, [call(tensor_pg), call(control_pg)])
         self.assertIsNone(group.store)
-        self.assertIsNone(group.obj_pg)
+        self.assertIsNone(group.tensor_pg)
+        self.assertIsNone(group.control_pg)
 
 
 if __name__ == "__main__":

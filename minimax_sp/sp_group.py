@@ -4,10 +4,10 @@ Rank 0 is the ComfyUI process itself; ranks 1..P-1 are thin worker processes tha
 hold only the DiT and do nothing but sequence-parallel forwards. Each worker gets
 CUDA_VISIBLE_DEVICES=<rank> so ComfyUI's own device plumbing stays untouched.
 
-Per step, rank 0 broadcasts a small metadata dict over a gloo subgroup and the
-input tensors over NCCL, then all ranks run the identical sp_forward. State is
-sent every step on purpose: no cross-step caching means no cache-invalidation
-class of bugs.
+Per step, rank 0 broadcasts a small metadata dict over the Gloo control group and
+the input tensors over a dedicated NCCL group, then all ranks run the identical
+sp_forward. State is sent every step on purpose: no cross-step caching means no
+cache-invalidation class of bugs.
 """
 
 import atexit
@@ -28,7 +28,6 @@ from comfy.cli_args import args as comfy_args
 import folder_paths
 
 from . import sp_forward as spf
-from . import sp_vae as spv
 from . import sp_patches as patch_sync
 
 REF_META_KEYS = ("kind", "latent_h", "latent_w", "latent_t", "ref_audio_t")
@@ -37,10 +36,84 @@ TO_WORKER_OPTIONS = ("minimax_h3_sigma_shift_video", "minimax_h3_sigma_shift_aud
 _GROUPS = {}
 
 
+def positive_timeout(name, default):
+    value = os.environ.get(name, str(default))
+    try:
+        seconds = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer number of seconds, got {value!r}") from exc
+    if seconds <= 0:
+        raise ValueError(f"{name} must be a positive integer number of seconds, got {value!r}")
+    return timedelta(seconds=seconds)
+
+
 def tensor_meta(t):
     if t is None:
         return None
     return {"shape": list(t.shape), "dtype": str(t.dtype).replace("torch.", "")}
+
+
+def forward_tensor_metadata(meta):
+    tensors = [meta["video"], meta["audio"], meta["timestep"], meta["context"], meta["tags"]]
+    tensors += meta["cond_video"]
+    tensors += meta["cond_audio"]
+    tensors += [meta["sample_sigmas"], meta["denoise_mask"], meta["audio_denoise_mask"]]
+    return tensors
+
+
+def forward_status(meta, ready=True, error=None):
+    metadata = forward_tensor_metadata(meta)
+    status = {
+        "ready": ready,
+        "operation_id": meta["operation_id"],
+        "tensor_count": sum(item is not None for item in metadata),
+        "tensor_metadata": metadata,
+    }
+    if error is not None:
+        status["error"] = str(error)
+    return status
+
+
+def validate_forward_status(expected, replies):
+    problems = []
+    for rank, reply in enumerate(replies):
+        if not isinstance(reply, dict):
+            problems.append(f"rank {rank} returned {reply!r}")
+            continue
+        if reply.get("ready") is not True:
+            problems.append(f"rank {rank} is not ready: {reply.get('error', reply)!r}")
+            continue
+        for key in ("operation_id", "tensor_count", "tensor_metadata"):
+            if reply.get(key) != expected[key]:
+                problems.append(f"rank {rank} {key} differs")
+    if problems:
+        raise RuntimeError("MiniMax SP forward control-plane mismatch before tensor collectives: " + "; ".join(problems))
+
+
+def validate_operation_id(operation_id, previous):
+    expected = previous + 1
+    if operation_id != expected:
+        raise RuntimeError(f"MiniMax SP worker expected operation_id {expected}, got {operation_id}")
+
+
+def startup_probe(rank, world, tensor_pg, device):
+    try:
+        reduced = torch.tensor([rank + 1], dtype=torch.float32, device=device)
+        dist.all_reduce(reduced, group=tensor_pg)
+        expected_sum = world * (world + 1) / 2
+        if reduced.item() != expected_sum:
+            raise RuntimeError(f"all_reduce returned {reduced.item()}, expected {expected_sum}")
+
+        source = torch.arange(world, dtype=torch.int64, device=device) + rank * world
+        received = torch.empty_like(source)
+        dist.all_to_all_single(received, source, group=tensor_pg)
+        expected = torch.arange(world, dtype=torch.int64, device=device) * world + rank
+        if not torch.equal(received, expected):
+            raise RuntimeError(f"all_to_all_single returned {received.tolist()}, expected {expected.tolist()}")
+    except Exception as exc:
+        raise RuntimeError(
+            "MiniMax SP NCCL startup probe failed; check per-worker GPU visibility, GPU P2P support, "
+            f"and NCCL logs (set NCCL_DEBUG=INFO): {exc}") from exc
 
 
 def alloc_from_meta(meta, device):
@@ -63,6 +136,7 @@ def build_meta(x, timestep, context, transformer_options, payload):
         "tags": tensor_meta(tags),
         "cond_video": [tensor_meta(t) for t in cond_v],
         "cond_audio": [tensor_meta(t) for t in cond_a],
+        "sample_sigmas": tensor_meta(transformer_options.get("sample_sigmas")),
         "keyframes": [{"resolved_frame_index": kf["resolved_frame_index"]}
                       for kf in (payload.get("keyframes") or [])] or None,
         "refs": [{k: r[k] for k in REF_META_KEYS if k in r}
@@ -101,11 +175,12 @@ def payload_from_meta(meta, tensors):
     return p
 
 
-def ordered_tensors(x, timestep, context, payload):
+def ordered_tensors(x, timestep, context, transformer_options, payload):
     payload = payload or {}
     out = [x[0], x[1], timestep, context, payload.get("text_token_tags")]
     out += list(payload.get("cond_video_latents", []) or [])
     out += list(payload.get("cond_audio_latents", []) or [])
+    out.append(transformer_options.get("sample_sigmas"))
     return out
 
 
@@ -118,12 +193,16 @@ class SPGroup:
         self.procs = []
         self.log_paths = {}
         self.n_forward = 0
-        self.vae_sent = False
+        self.operation_id = 0
         self.patch_uuid = None
         self.patches_ready = False
         self.verify_pending = False
-        self.obj_pg = None
+        self.control_pg = None
+        self.tensor_pg = None
         self.store = None
+        self._owns_default_pg = False
+        self.startup_timeout = positive_timeout("MINIMAX_SP_STARTUP_TIMEOUT", 300)
+        self.collective_timeout = positive_timeout("MINIMAX_SP_COLLECTIVE_TIMEOUT", 120)
         try:
             self._start(world, unet_name, weight_dtype, devices, port)
         except (Exception, comfy.model_management.InterruptProcessingException):
@@ -134,7 +213,7 @@ class SPGroup:
         # A fresh store avoids reusing stale rendezvous keys after cancellation.
         # Bind port 0 before spawning, rather than probing/releasing a free port.
         self.store = dist.TCPStore("127.0.0.1", port, world, True,
-                                   timeout=timedelta(minutes=40), wait_for_workers=False)
+                                   timeout=self.startup_timeout, wait_for_workers=False)
         port = self.store.port
         comfy_root = os.path.dirname(os.path.abspath(folder_paths.__file__))
         runtime = {k: getattr(comfy_args, k) for k in (
@@ -148,6 +227,8 @@ class SPGroup:
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = devices[r]
             env["PYTHONPATH"] = comfy_root + os.pathsep + env.get("PYTHONPATH", "")
+            env["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+            env["TORCH_NCCL_BLOCKING_WAIT"] = "1"
             log_path = os.path.join(log_dir, f"minimax_sp_worker{r}.log")
             self.log_paths[r] = log_path
             with open(log_path, "w") as log:
@@ -155,18 +236,30 @@ class SPGroup:
                     [sys.executable, script, "--rank", str(r), "--world", str(world),
                      "--port", str(port), "--unet", folder_paths.get_full_path_or_raise("diffusion_models", unet_name),
                      "--weight-dtype", weight_dtype, "--comfy-root", comfy_root,
+                     "--startup-timeout", str(int(self.startup_timeout.total_seconds())),
+                     "--collective-timeout", str(int(self.collective_timeout.total_seconds())),
                      "--runtime-options", json.dumps(runtime)],
                     env=env, stdout=log, stderr=log, cwd=comfy_root))
             logging.info(f"[minimax_sp] spawned worker rank {r} on physical GPU {devices[r]}")
 
-        dist.init_process_group("nccl", store=self.store,
-                                rank=0, world_size=world, timeout=timedelta(minutes=40),
-                                device_id=torch.device("cuda", 0))
-        self.obj_pg = dist.new_group(backend="gloo", timeout=timedelta(minutes=40))
-        logging.info("[minimax_sp] process group up, waiting for workers to load weights...")
-        dist.barrier()
+        os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
+        os.environ.setdefault("TORCH_NCCL_BLOCKING_WAIT", "1")
+        dist.init_process_group("gloo", store=self.store, rank=0, world_size=world,
+                                timeout=self.startup_timeout)
+        self._owns_default_pg = True
+        self.control_pg = dist.group.WORLD
+        self.tensor_pg = dist.new_group(backend="nccl", timeout=self.collective_timeout)
+        logging.info("[minimax_sp] process groups up, waiting for workers to load weights...")
+        loaded = [None] * world
+        dist.all_gather_object(loaded, {"loaded": True}, group=self.control_pg)
+        if any(reply != {"loaded": True} for reply in loaded):
+            raise RuntimeError(f"MiniMax SP worker load failed: {loaded}")
+        self._startup_probe()
         logging.info(f"[minimax_sp] all {world} ranks ready")
         atexit.register(self.shutdown)
+
+    def _startup_probe(self):
+        startup_probe(0, self.world, self.tensor_pg, torch.device("cuda", 0))
 
     def check_alive(self):
         for r, p in enumerate(self.procs, start=1):
@@ -181,16 +274,16 @@ class SPGroup:
         version = patch_sync.patch_version(patcher)
         try:
             dist.broadcast_object_list([{"op": "prepare", "memory_required": patch_sync.memory_budget(patcher),
-                                         "version": version}], src=0, group=self.obj_pg)
+                                         "version": version}], src=0, group=self.control_pg)
             ready = [None] * self.world
-            dist.all_gather_object(ready, {"ready": True}, group=self.obj_pg)
+            dist.all_gather_object(ready, {"ready": True}, group=self.control_pg)
             if any(reply != {"ready": True} for reply in ready):
                 raise RuntimeError(f"MiniMax SP worker preparation failed: {ready}")
             if version != self.patch_uuid:
                 with patch_sync.export_patches(patcher) as manifest:
-                    dist.broadcast_object_list([manifest.message()], src=0, group=self.obj_pg)
+                    dist.broadcast_object_list([manifest.message()], src=0, group=self.control_pg)
                     replies = [None] * self.world
-                    dist.all_gather_object(replies, manifest.ready(0), group=self.obj_pg)
+                    dist.all_gather_object(replies, manifest.ready(0), group=self.control_pg)
                     patch_sync.validate_replies(manifest, replies, self.world)
                 self.patch_uuid = version
                 self.verify_pending = os.environ.get("MINIMAX_SP_VERIFY") == "1"
@@ -206,27 +299,32 @@ class SPGroup:
         self.check_alive()
         if not self.patches_ready:
             raise RuntimeError("MiniMax SP denoise prohibited: patches have not been acknowledged")
-        if transformer_options.get("patches_replace") or transformer_options.get("patches"):
-            raise RuntimeError("[minimax_sp] attention/block patches require SP-aware handling")
+        spf.validate_transformer_options(transformer_options)
         profile = os.environ.get("MINIMAX_SP_PROFILE")
         try:
             t_disp = time.perf_counter()
             meta = build_meta(x, timestep, context, transformer_options, payload)
+            meta["operation_id"] = self.operation_id + 1
             meta["denoise_mask"] = tensor_meta(denoise_mask)
             meta["audio_denoise_mask"] = tensor_meta(audio_denoise_mask)
-            if transformer_options.get("sample_sigmas") is not None:
-                meta["options"]["sample_sigmas"] = transformer_options["sample_sigmas"].cpu()
-            dist.broadcast_object_list([meta], src=0, group=self.obj_pg)
+            dist.broadcast_object_list([meta], src=0, group=self.control_pg)
+            expected = forward_status(meta)
+            replies = [None] * self.world
+            dist.all_gather_object(replies, expected, group=self.control_pg)
+            validate_forward_status(expected, replies)
+            self.operation_id = meta["operation_id"]
             t_meta = time.perf_counter()
             device = x[0].device
-            for t in [*ordered_tensors(x, timestep, context, payload), denoise_mask, audio_denoise_mask]:
+            if transformer_options.get("sample_sigmas") is not None:
+                transformer_options["sample_sigmas"] = transformer_options["sample_sigmas"].to(device)
+            for t in [*ordered_tensors(x, timestep, context, transformer_options, payload), denoise_mask, audio_denoise_mask]:
                 if t is not None:
-                    dist.broadcast(t.to(device).contiguous(), src=0)
+                    dist.broadcast(t.to(device).contiguous(), src=0, group=self.tensor_pg)
             if profile:
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
             out = spf.sp_forward(dit, x, timestep, context, transformer_options, payload,
-                                 0, self.world, None, denoise_mask, audio_denoise_mask)
+                                 0, self.world, self.tensor_pg, denoise_mask, audio_denoise_mask)
             if self.verify_pending:
                 # Verification only: compare the actual loaded ranks to native H3 before accepting a step.
                 reference = type(dit)._forward(dit, x, timestep, context, transformer_options.copy(),
@@ -247,123 +345,12 @@ class SPGroup:
                              f"sp_forward={1000 * (time.perf_counter() - t0):.1f}ms")
                 self.n_forward += 1
             return out
-        except (Exception, comfy.model_management.InterruptProcessingException):
-            # ranks are desynchronized past this point; drop the group so the next
-            # prompt respawns a clean one instead of hanging on a collective
-            logging.exception("[minimax_sp] forward failed, tearing down the group")
+        except comfy.model_management.InterruptProcessingException:
+            logging.info("[minimax_sp] forward cancelled; rebuilding the group on the next prompt")
             self.destroy()
             raise
-
-    def send_vae(self, fsm, device):
-        """Hand the video VAE weights to the workers once, so no filename is guessed."""
-        sd = fsm.state_dict()
-        manifest = [(k, list(v.shape), str(v.dtype).replace("torch.", "")) for k, v in sd.items()]
-        dist.broadcast_object_list([{"op": "vae_load", "manifest": manifest}],
-                                   src=0, group=self.obj_pg)
-        for k, _, _ in manifest:
-            dist.broadcast(sd[k].to(device).contiguous(), src=0)
-        dist.barrier()
-        total = sum(v.numel() * v.element_size() for v in sd.values())
-        logging.info(f"[minimax_sp] sent video VAE to workers ({total / 2**30:.2f} GiB)")
-        self.vae_sent = True
-
-    def vae_decode(self, vae, samples):
-        """Decode the latent with the temporal chunks spread over the group.
-
-        Returns None when there is nothing to gain, so the caller can fall back to
-        the stock single-GPU decode.
-        """
-        self.check_alive()
-        fsm = vae.first_stage_model
-        pad_tokens, bounds = spv.chunk_plan(fsm, samples.shape[2])
-        if len(bounds) < 2 or samples.shape[2] == 1:
-            return None
-
-        try:
-            device = vae.device
-            t_setup = time.perf_counter()
-            # comfy only pulls the VAE onto the GPU inside vae.decode(), but the
-            # local chunks are decoded before that call, so make it resident here
-            # or larger shapes decode against offloaded CPU weights. Kept ahead of
-            # every broadcast: a failure must not leave workers in a collective.
-            comfy.model_management.load_models_gpu(
-                [vae.patcher],
-                memory_required=vae.memory_used_decode(samples.shape, vae.vae_dtype),
-                force_full_load=getattr(vae, "disable_offload", False))
-
-            if not self.vae_sent:
-                self.send_vae(fsm, device)
-
-            z = samples.to(device=device, dtype=vae.vae_dtype)
-            dtype = str(z.dtype).replace("torch.", "")
-            dist.broadcast_object_list([{"op": "vae_decode", "z": tensor_meta(z),
-                                         "dtype": dtype}], src=0, group=self.obj_pg)
-            dist.broadcast(z.contiguous(), src=0)
-
-            prepared = spv.prepare_latent(fsm, z, pad_tokens)
-            torch.cuda.synchronize()
-            t_local = time.perf_counter()
-            chunks = spv.decode_local(fsm, prepared, bounds, 0, self.world)
-            torch.cuda.synchronize()
-            t_wait = time.perf_counter()
-
-            recvs = []
-            ops = []
-            for i, (t0, t1) in enumerate(bounds):
-                owner = i % self.world
-                if owner == 0:
-                    continue
-                buf = torch.empty(spv.chunk_shape(fsm, prepared, t0, t1),
-                                  dtype=chunks[0].dtype if chunks else z.dtype, device=device)
-                recvs.append((i, buf))
-                ops.append(dist.P2POp(dist.irecv, buf, peer=owner))
-            works = dist.batch_isend_irecv(ops) if ops else []
-            for w in works:
-                w.wait()
-            for i, buf in recvs:
-                chunks[i] = buf
-
-            if os.environ.get("MINIMAX_SP_VAE_VERIFY"):
-                for i, (t0, t1) in enumerate(bounds):
-                    ref = fsm._adaptive_decode(prepared[:, :, t0:t1])
-                    d = (chunks[i].float() - ref.float()).abs().max().item()
-                    logging.info(f"[minimax_sp][vae] chunk {i} owner {i % self.world} "
-                                 f"shape {tuple(chunks[i].shape)} max_abs={d:.3e}")
-
-            served = {"n": 0}
-
-            def serve(clip_z):
-                i = served["n"]
-                served["n"] += 1
-                got = chunks.get(i)
-                if got is not None and got.shape[2] == clip_z.shape[2] * fsm.vae_ratio_t:
-                    return got
-                logging.warning(f"[minimax_sp] vae chunk {i} did not match the plan, "
-                                "decoding it locally")
-                return original(clip_z)
-
-            original = fsm._adaptive_decode
-            fsm._adaptive_decode = serve
-            t_assemble = time.perf_counter()
-            try:
-                out = vae.decode(samples)
-            finally:
-                fsm._adaptive_decode = original
-            torch.cuda.synchronize()
-            logging.info(
-                f"[minimax_sp] vae decode: {len(bounds)} chunks, "
-                f"{len(bounds) - len(recvs)} local, setup={t_local - t_setup:.2f}s "
-                f"local={t_wait - t_local:.2f}s recv={t_assemble - t_wait:.2f}s "
-                f"assemble={time.perf_counter() - t_assemble:.2f}s")
-            if os.environ.get("MINIMAX_SP_VAE_VERIFY"):
-                ref_out = vae.decode(samples)
-                d = (out.float() - ref_out.float()).abs()
-                logging.info(f"[minimax_sp][vae] final pixels {tuple(out.shape)} "
-                             f"exact={torch.equal(out, ref_out)} max_abs={d.max().item():.3e} "
-                             f"differing={int((d > 0).sum())}/{d.numel()}")
-            return out
-        except (Exception, comfy.model_management.InterruptProcessingException):
-            logging.exception("[minimax_sp] sharded vae decode failed, tearing down the group")
+        except Exception as exc:
+            logging.error("[minimax_sp] forward failed; rebuilding the group on the next prompt: %s", exc)
             self.destroy()
             raise
 
@@ -371,27 +358,37 @@ class SPGroup:
         # Do not broadcast shutdown into a failed collective.
         self.patches_ready = False
         atexit.unregister(self.shutdown)
-        for process in self.procs:
+        for process in getattr(self, "procs", []):
             if process.poll() is None:
                 process.kill()
             process.wait()
         self.procs = []
+
+        tensor_pg = getattr(self, "tensor_pg", None)
+        control_pg = getattr(self, "control_pg", None)
+        owns_default = getattr(self, "_owns_default_pg", False)
+        initialized = dist.is_initialized()
         try:
-            if dist.is_initialized():
-                dist.destroy_process_group()
+            if initialized and tensor_pg is not None:
+                dist.destroy_process_group(tensor_pg)
         finally:
-            # Python references can keep Gloo and its rendezvous store alive.
-            self.obj_pg = None
-            self.store = None
-            for key, group in list(_GROUPS.items()):
-                if group is self:
-                    del _GROUPS[key]
+            self.tensor_pg = None
+            try:
+                if initialized and owns_default and control_pg is not None:
+                    dist.destroy_process_group(control_pg)
+            finally:
+                self.control_pg = None
+                self._owns_default_pg = False
+                self.store = None
+                for key, group in list(_GROUPS.items()):
+                    if group is self:
+                        del _GROUPS[key]
 
     def shutdown(self):
         if not self.procs:
             return
         try:
-            dist.broadcast_object_list([{"op": "shutdown"}], src=0, group=self.obj_pg)
+            dist.broadcast_object_list([{"op": "shutdown"}], src=0, group=self.control_pg)
         except Exception:
             pass
         for p in self.procs:
